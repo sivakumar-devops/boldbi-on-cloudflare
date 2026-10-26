@@ -61,7 +61,30 @@ function secureApplicationResponse(response: Response, publicUrl: URL): Response
   return secured;
 }
 
-export class IdWebContainer extends Container<MultiEnv> {
+// The stock port check follows redirects. The apps redirect to their https base URL, which the
+// container runtime refuses to follow, so the check never succeeds. Any HTTP answer means "up".
+class BoldContainer extends Container<MultiEnv> {
+  override async waitForPort(waitOptions: Parameters<Container["waitForPort"]>[0]): Promise<number> {
+    const tcpPort = this.ctx.container!.getTcpPort(waitOptions.portToCheck);
+    const interval = waitOptions.waitInterval ?? 300;
+    const tries = waitOptions.retries ?? Math.ceil(30_000 / interval);
+    for (let i = 0; i < tries; i++) {
+      try {
+        await tcpPort.fetch(`http://${this.pingEndpoint}`, {
+          redirect: "manual",
+          signal: AbortSignal.timeout(5000),
+        });
+        return i;
+      } catch (e) {
+        if (!this.ctx.container?.running || i === tries - 1) throw e;
+        await new Promise((resolve) => setTimeout(resolve, interval));
+      }
+    }
+    return tries;
+  }
+}
+
+export class IdWebContainer extends BoldContainer {
   defaultPort = 80;
   sleepAfter = "6h";
   enableInternet = true;
@@ -78,7 +101,7 @@ export class IdWebContainer extends Container<MultiEnv> {
   }
 }
 
-export class IdApiContainer extends Container<MultiEnv> {
+export class IdApiContainer extends BoldContainer {
   defaultPort = 80;
   sleepAfter = "6h";
   enableInternet = true;
@@ -95,7 +118,7 @@ export class IdApiContainer extends Container<MultiEnv> {
   }
 }
 
-export class IdUmsContainer extends Container<MultiEnv> {
+export class IdUmsContainer extends BoldContainer {
   defaultPort = 80;
   sleepAfter = "6h";
   enableInternet = true;
