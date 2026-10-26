@@ -160,6 +160,18 @@ export default {
       });
     }
 
+    // TEMPORARY: shape of the S3 settings (never the values), to debug S3 403s. Remove once fixed.
+    if (path === "/_internal/s3-config") {
+      const shape = (v?: string) => (v === undefined ? "MISSING" : { length: v.length, trimmedLength: v.trim().length, hasQuoteOrNewline: /["'\r\n]/.test(v) });
+      return Response.json({
+        bucket: env.BOLD_SERVICES_AMAZON_BUCKET_NAME, // not secret
+        region: env.BOLD_SERVICES_AWS_REGION,
+        rootFolder: env.BOLD_SERVICES_AMAZON_ROOTFOLDER_NAME,
+        accessKeyId: { ...(shape(env.BOLD_SERVICES_AWS_ACCESS_KEY_ID) as object), first4: env.BOLD_SERVICES_AWS_ACCESS_KEY_ID?.slice(0, 4), last4: env.BOLD_SERVICES_AWS_ACCESS_KEY_ID?.slice(-4) },
+        secretAccessKey: shape(env.BOLD_SERVICES_AWS_SECRET_ACCESS_KEY),
+      });
+    }
+
     if (UNAVAILABLE_PREFIXES.some((p) => path === p || path.startsWith(p + "/"))) {
       return new Response("Service not deployed", { status: 503, headers: { "Retry-After": "60" } });
     }
