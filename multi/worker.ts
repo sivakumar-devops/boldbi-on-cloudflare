@@ -114,7 +114,11 @@ export class IdUmsContainer extends Container<MultiEnv> {
 
 // Services not deployed yet: answer immediately so the apps' retry loops don't load the containers.
 const UNAVAILABLE_PREFIXES = ["/bi", "/reporting", "/aiservice", "/mcp", "/etlservice", "/reportsai", "/reportsmcp"];
-const HEALTH_PATHS = new Set(["/health-check", "/api/health-check", "/ums/health-check"]);
+const HEALTH_PATHS = new Set([
+  "/health-check", "/api/health-check", "/ums/health-check",
+  "/bi/health-check", "/bi/api/health-check", "/bi/jobs/health-check", "/bi/designer/health-check",
+  "/aiservice/health-check", "/etlservice/health-check",
+]);
 const HEALTH_TTL_MS = 5000;
 const healthCache = new Map<string, { at: number; status: number; body: string }>();
 
