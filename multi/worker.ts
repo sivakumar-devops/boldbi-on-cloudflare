@@ -19,9 +19,7 @@ function buildContainerEnv(requestUrl: string, env: MultiEnv): Record<string, st
 
   const vars: Record<string, string> = {
     APP_BASE_URL: appBase,
-    BOLD_SERVICES_HOSTING_ENVIRONMENT: "docker",
     BOLD_SERVICES_PV_USED: "false",
-    DEPLOY_MODE: "docker_multi_container",
   };
 
   if (env.BOLD_SERVICES_DB_HOST) {

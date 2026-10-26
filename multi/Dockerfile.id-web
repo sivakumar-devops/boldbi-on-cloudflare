@@ -1,6 +1,2 @@
 FROM syncfusion/bold-identity:17.1.30
-COPY entrypoint-wrapper.sh /usr/local/bin/entrypoint-wrapper.sh
-RUN chmod +x /usr/local/bin/entrypoint-wrapper.sh
-WORKDIR /application/idp/web
-ENTRYPOINT ["/usr/local/bin/entrypoint-wrapper.sh"]
 EXPOSE 80
