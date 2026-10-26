@@ -46,6 +46,20 @@ export function buildContainerEnv(requestUrl: string, env: MultiEnv, withDatabas
     BOLD_SERVICES_HOSTING_ENVIRONMENT: "docker",
   };
 
+  // The vendor manifests point these at Kubernetes service names. Containers here cannot reach each
+  // other directly, so use the public URL, which the Worker routes to the right container.
+  const base = vars.APP_BASE_URL.replace(/\/+$/, "");
+  Object.assign(vars, {
+    ID_WEB_SERVICE_URL: base,
+    ID_API_SERVICE_URL: `${base}/api`,
+    ID_UMS_SERVICE_URL: `${base}/ums`,
+    BI_WEB_SERVICE_URL: `${base}/bi`,
+    BI_API_SERVICE_URL: `${base}/bi/api`,
+    BI_JOBS_SERVICE_URL: `${base}/bi/jobs`,
+    BI_DESIGNER_SERVICE_URL: `${base}/bi/designer`,
+    BI_DESIGNER_HELPER_SERVICE_URL: `${base}/bi/designer/helper`,
+  });
+
   if (env.BOLD_SERVICES_AMAZON_BUCKET_NAME) {
     vars.BOLD_SERVICES_STORAGETYPE = "3";
     for (const k of S3_KEYS) if (env[k]) vars[k] = env[k]!;
