@@ -6,6 +6,7 @@ export interface MultiEnv {
   ID_UMS_CONTAINER: DurableObjectNamespace<IdUmsContainer>;
 
   // Optional overrides (for when Azure Postgres / R2 are configured)
+  ADMIN_TOKEN?: string; // secret; enables POST /_internal/reset
   SPIKE_FAKE_HEALTH?: string; // "true": answer health probes in the Worker (diagnostic only)
   SERVICE_COMMUNICATION?: string; // "public_url" (default)
   APP_BASE_URL?: string;
@@ -145,6 +146,18 @@ export default {
       if (hit && Date.now() - hit.at < HEALTH_TTL_MS) {
         return new Response(hit.body, { status: hit.status, headers: { "Content-Type": "text/plain" } });
       }
+    }
+
+    if (path === "/_internal/reset" && request.method === "POST") {
+      if (!env.ADMIN_TOKEN || request.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) {
+        return new Response("Not found", { status: 404 });
+      }
+      await Promise.all([
+        env.ID_WEB_CONTAINER.getByName("id-web").destroy(),
+        env.ID_API_CONTAINER.getByName("id-api").destroy(),
+        env.ID_UMS_CONTAINER.getByName("id-ums").destroy(),
+      ]);
+      return Response.json({ ok: true, destroyed: ["id-web", "id-api", "id-ums"] });
     }
 
     const headers = new Headers(request.headers);

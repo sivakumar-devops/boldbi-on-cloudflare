@@ -14,20 +14,21 @@ vi.mock("@cloudflare/containers", () => ({
 import worker, { MultiEnv } from "./worker";
 
 function setup() {
+  const destroy = vi.fn(async () => undefined);
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
   const idApiFetch = vi.fn(async () => new Response("id-api-response"));
   const idUmsFetch = vi.fn(async () => new Response("id-ums-response"));
 
   const env: MultiEnv = {
-    ID_WEB_CONTAINER: { getByName: vi.fn(() => ({ fetch: idWebFetch })) } as never,
-    ID_API_CONTAINER: { getByName: vi.fn(() => ({ fetch: idApiFetch })) } as never,
-    ID_UMS_CONTAINER: { getByName: vi.fn(() => ({ fetch: idUmsFetch })) } as never,
+    ID_WEB_CONTAINER: { getByName: vi.fn(() => ({ fetch: idWebFetch, destroy })) } as never,
+    ID_API_CONTAINER: { getByName: vi.fn(() => ({ fetch: idApiFetch, destroy })) } as never,
+    ID_UMS_CONTAINER: { getByName: vi.fn(() => ({ fetch: idUmsFetch, destroy })) } as never,
   };
 
   const fetch = (path: string, init?: RequestInit) =>
     worker.fetch(new Request("https://app.example" + path, init), env);
 
-  return { env, fetch, idWebFetch, idApiFetch, idUmsFetch };
+  return { env, fetch, destroy, idWebFetch, idApiFetch, idUmsFetch };
 }
 
 describe("multi routing tests", () => {
@@ -120,5 +121,17 @@ describe("multi routing tests", () => {
     expect(idUmsFetch).not.toHaveBeenCalled();
     const real = await worker.fetch(new Request("https://app.example/ums/"), env);
     expect(await real.text()).toBe("id-ums-response");
+  });
+
+  it("/_internal/reset is hidden without the admin token and destroys all containers with it", async () => {
+    const { env, destroy } = setup();
+    const post = (h?: Record<string, string>) =>
+      worker.fetch(new Request("https://app.example/_internal/reset", { method: "POST", headers: h }), env);
+    expect((await post()).status).toBe(404);
+    env.ADMIN_TOKEN = "s3cret";
+    expect((await post({ "X-Admin-Token": "wrong" })).status).toBe(404);
+    expect(destroy).not.toHaveBeenCalled();
+    expect((await post({ "X-Admin-Token": "s3cret" })).status).toBe(200);
+    expect(destroy).toHaveBeenCalledTimes(3);
   });
 });
