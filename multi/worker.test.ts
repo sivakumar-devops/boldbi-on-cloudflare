@@ -14,21 +14,20 @@ vi.mock("@cloudflare/containers", () => ({
 import worker, { IdUmsContainer, MultiEnv } from "./worker";
 
 function setup() {
-  const destroy = vi.fn(async () => undefined);
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
   const idApiFetch = vi.fn(async () => new Response("id-api-response"));
   const idUmsFetch = vi.fn(async () => new Response("id-ums-response"));
 
   const env: MultiEnv = {
-    ID_WEB_CONTAINER: { getByName: vi.fn(() => ({ fetch: idWebFetch, destroy })) } as never,
-    ID_API_CONTAINER: { getByName: vi.fn(() => ({ fetch: idApiFetch, destroy })) } as never,
-    ID_UMS_CONTAINER: { getByName: vi.fn(() => ({ fetch: idUmsFetch, destroy })) } as never,
+    ID_WEB_CONTAINER: { getByName: vi.fn(() => ({ fetch: idWebFetch })) } as never,
+    ID_API_CONTAINER: { getByName: vi.fn(() => ({ fetch: idApiFetch })) } as never,
+    ID_UMS_CONTAINER: { getByName: vi.fn(() => ({ fetch: idUmsFetch })) } as never,
   };
 
   const fetch = (path: string, init?: RequestInit) =>
     worker.fetch(new Request("https://app.example" + path, init), env);
 
-  return { env, fetch, destroy, idWebFetch, idApiFetch, idUmsFetch };
+  return { env, fetch, idWebFetch, idApiFetch, idUmsFetch };
 }
 
 describe("multi routing tests", () => {
@@ -107,32 +106,6 @@ describe("multi routing tests", () => {
     const res = await fetch("/api/health-check");
     expect(res.status).toBe(200);
     expect(idApiFetch).toHaveBeenCalledTimes(1);
-  });
-
-  it("fakes health probes without touching containers when SPIKE_FAKE_HEALTH=true", async () => {
-    const { env, idWebFetch, idApiFetch, idUmsFetch } = setup();
-    env.SPIKE_FAKE_HEALTH = "true";
-    for (const p of ["/health-check", "/api/health-check", "/ums/health-check"]) {
-      const res = await worker.fetch(new Request("https://app.example" + p), env);
-      expect(res.status).toBe(200);
-    }
-    expect(idWebFetch).not.toHaveBeenCalled();
-    expect(idApiFetch).not.toHaveBeenCalled();
-    expect(idUmsFetch).not.toHaveBeenCalled();
-    const real = await worker.fetch(new Request("https://app.example/ums/"), env);
-    expect(await real.text()).toBe("id-ums-response");
-  });
-
-  it("/_internal/reset is hidden without the admin token and destroys all containers with it", async () => {
-    const { env, destroy } = setup();
-    const post = (h?: Record<string, string>) =>
-      worker.fetch(new Request("https://app.example/_internal/reset", { method: "POST", headers: h }), env);
-    expect((await post()).status).toBe(404);
-    env.ADMIN_TOKEN = "s3cret";
-    expect((await post({ "X-Admin-Token": "wrong" })).status).toBe(404);
-    expect(destroy).not.toHaveBeenCalled();
-    expect((await post({ "X-Admin-Token": "s3cret" })).status).toBe(200);
-    expect(destroy).toHaveBeenCalledTimes(3);
   });
 
   it("port readiness check treats a redirect as ready and does not follow it", async () => {
