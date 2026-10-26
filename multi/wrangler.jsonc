@@ -1,0 +1,64 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "boldbi-multi",
+  "account_id": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-16",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "containers": [
+    {
+      "class_name": "IdWebContainer",
+      "image": "./Dockerfile.id-web",
+      "image_build_context": ".",
+      "instance_type": "standard-2",
+      "max_instances": 1
+    },
+    {
+      "class_name": "IdApiContainer",
+      "image": "./Dockerfile.id-api",
+      "image_build_context": ".",
+      "instance_type": "standard-1",
+      "max_instances": 1
+    },
+    {
+      "class_name": "IdUmsContainer",
+      "image": "./Dockerfile.id-ums",
+      "image_build_context": ".",
+      "instance_type": "standard-2",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ID_WEB_CONTAINER",
+        "class_name": "IdWebContainer"
+      },
+      {
+        "name": "ID_API_CONTAINER",
+        "class_name": "IdApiContainer"
+      },
+      {
+        "name": "ID_UMS_CONTAINER",
+        "class_name": "IdUmsContainer"
+      }
+    ]
+  },
+  "exports": {
+    "IdWebContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "IdApiContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "IdUmsContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}
