@@ -99,7 +99,7 @@ class BoldContainer extends Container<MultiEnv> {
     const tries = waitOptions.retries ?? Math.ceil(30_000 / interval);
     for (let i = 0; i < tries; i++) {
       try {
-        const socket = tcpPort.connect(`${this.pingEndpoint}:${waitOptions.portToCheck}`);
+        const socket = tcpPort.connect(`ping:${waitOptions.portToCheck}`);
         await socket.opened;
         await socket.close();
         return i;
