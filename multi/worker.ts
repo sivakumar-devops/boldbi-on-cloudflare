@@ -50,6 +50,20 @@ export function buildContainerEnv(requestUrl: string, env: MultiEnv, withDatabas
     BOLD_SERVICES_CONSOLE_LOG_ENABLED: "true",
   };
 
+  // The vendor compose resolves services by Docker hostname (http://id-api/api). Containers here
+  // share no network, so point every service at the public URL, which the Worker routes.
+  const base = vars.APP_BASE_URL.replace(/\/+$/, "");
+  Object.assign(vars, {
+    ID_WEB_SERVICE_URL: base,
+    ID_API_SERVICE_URL: `${base}/api`,
+    ID_UMS_SERVICE_URL: `${base}/ums`,
+    BI_WEB_SERVICE_URL: `${base}/bi`,
+    BI_API_SERVICE_URL: `${base}/bi/api`,
+    BI_JOBS_SERVICE_URL: `${base}/bi/jobs`,
+    BI_DESIGNER_SERVICE_URL: `${base}/bi/designer`,
+    BI_DESIGNER_HELPER_SERVICE_URL: `${base}/bi/designer/helper`,
+  });
+
   if (env.BOLD_SERVICES_AMAZON_BUCKET_NAME) {
     vars.BOLD_SERVICES_STORAGETYPE = "3";
     for (const k of S3_KEYS) if (env[k]) vars[k] = env[k]!;
