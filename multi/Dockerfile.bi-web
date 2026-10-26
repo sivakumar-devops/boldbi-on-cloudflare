@@ -1,0 +1,2 @@
+FROM syncfusion/boldbi-server:17.1.30
+EXPOSE 80

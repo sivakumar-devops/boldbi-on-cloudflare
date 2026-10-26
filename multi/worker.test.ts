@@ -11,14 +11,23 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
   const idApiFetch = vi.fn(async () => new Response("id-api-response"));
   const idUmsFetch = vi.fn(async () => new Response("id-ums-response"));
 
+  const biWebFetch = vi.fn(async () => new Response("bi-web-response"));
+  const biApiFetch = vi.fn(async () => new Response("bi-api-response"));
+  const biJobsFetch = vi.fn(async () => new Response("bi-jobs-response"));
+  const biDesignerFetch = vi.fn(async () => new Response("bi-designer-response"));
+
   const env: MultiEnv = {
+    BI_WEB_CONTAINER: { getByName: vi.fn(() => ({ fetch: biWebFetch })) } as never,
+    BI_API_CONTAINER: { getByName: vi.fn(() => ({ fetch: biApiFetch })) } as never,
+    BI_JOBS_CONTAINER: { getByName: vi.fn(() => ({ fetch: biJobsFetch })) } as never,
+    BI_DESIGNER_CONTAINER: { getByName: vi.fn(() => ({ fetch: biDesignerFetch })) } as never,
     ID_WEB_CONTAINER: { getByName: vi.fn(() => ({ fetch: idWebFetch })) } as never,
     ID_API_CONTAINER: { getByName: vi.fn(() => ({ fetch: idApiFetch })) } as never,
     ID_UMS_CONTAINER: { getByName: vi.fn(() => ({ fetch: idUmsFetch })) } as never,
@@ -27,7 +36,7 @@ function setup() {
   const fetch = (path: string, init?: RequestInit) =>
     worker.fetch(new Request("https://app.example" + path, init), env);
 
-  return { env, fetch, idWebFetch, idApiFetch, idUmsFetch };
+  return { env, fetch, idWebFetch, idApiFetch, idUmsFetch, biWebFetch, biApiFetch, biJobsFetch, biDesignerFetch };
 }
 
 describe("multi routing tests", () => {
@@ -37,7 +46,7 @@ describe("multi routing tests", () => {
     expect(res.status).toBe(200);
     const json = await res.json() as { ok: boolean; services: string[] };
     expect(json.ok).toBe(true);
-    expect(json.services).toEqual(["id-web", "id-api", "id-ums"]);
+    expect(json.services).toEqual(["id-web", "id-api", "id-ums", "bi-web", "bi-api", "bi-jobs", "bi-designer"]);
     expect(env.ID_WEB_CONTAINER.getByName).not.toHaveBeenCalled();
   });
 
@@ -92,12 +101,50 @@ describe("multi routing tests", () => {
 
   it("returns 503 for services that are not deployed, without touching containers", async () => {
     const { fetch, idWebFetch, idApiFetch, idUmsFetch } = setup();
-    for (const p of ["/bi/jobs/health-check", "/reporting/jobs/health-check", "/aiservice"]) {
+    for (const p of ["/aiservice", "/etlservice/x", "/mcp"]) {
       expect((await fetch(p)).status).toBe(503);
     }
     expect(idWebFetch).not.toHaveBeenCalled();
     expect(idApiFetch).not.toHaveBeenCalled();
     expect(idUmsFetch).not.toHaveBeenCalled();
+  });
+
+  it("routes /bi paths to the right Bold BI container, longest prefix first", async () => {
+    const s = setup();
+    const cases: [string, string][] = [
+      ["/bi", "bi-web-response"],
+      ["/bi/dashboards", "bi-web-response"],
+      ["/bi/api/v1.0/items", "bi-api-response"],
+      ["/bi/jobs/health-check", "bi-jobs-response"],
+      ["/bi/designer", "bi-designer-response"],
+      ["/bi/designer/helper/hub", "bi-designer-response"],
+      ["/biography", "id-web-response"],
+    ];
+    for (const [p, body] of cases) expect(await (await s.fetch(p)).text()).toBe(body);
+    expect(s.biWebFetch).toHaveBeenCalledTimes(2);
+    expect(s.biDesignerFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("builds container env: S3 for all services, database only for UMS", () => {
+    const env = {
+      BOLD_SERVICES_AMAZON_BUCKET_NAME: "bkt",
+      BOLD_SERVICES_AWS_REGION: "us-east-1",
+      BOLD_SERVICES_AWS_ACCESS_KEY_ID: "id",
+      BOLD_SERVICES_AWS_SECRET_ACCESS_KEY: "secret",
+      BOLD_SERVICES_DB_HOST: "db.example",
+      BOLD_SERVICES_DB_PASSWORD: "pw",
+    } as MultiEnv;
+    const bi = buildContainerEnv("https://app.example/bi", env, false);
+    expect(bi).toMatchObject({
+      APP_BASE_URL: "https://app.example",
+      BOLD_SERVICES_STORAGETYPE: "3",
+      BOLD_SERVICES_AMAZON_BUCKET_NAME: "bkt",
+      BOLD_SERVICES_AWS_SECRET_ACCESS_KEY: "secret",
+    });
+    expect(bi).not.toHaveProperty("BOLD_SERVICES_DB_HOST");
+    const ums = buildContainerEnv("https://app.example/ums", env, true);
+    expect(ums).toMatchObject({ BOLD_SERVICES_DB_TYPE: "postgresql", BOLD_SERVICES_DB_HOST: "db.example", BOLD_SERVICES_DB_PASSWORD: "pw" });
+    expect(buildContainerEnv("https://a/", {} as MultiEnv, false)).not.toHaveProperty("BOLD_SERVICES_STORAGETYPE");
   });
 
   it("caches successful health checks briefly", async () => {

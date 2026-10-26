@@ -17,6 +17,11 @@ Browser / API  ──► Cloudflare  ───┼───► IdApiContainer (sy
                                         Port 80: /ums (Tenant & User Management)
 ```
 
+Phase 1 adds the Bold BI core services (images from the vendor's multi-container compose file):
+`/bi` -> bi-web (`boldbi-server`), `/bi/api` -> bi-api (`boldbi-server-api`),
+`/bi/jobs` -> bi-jobs (`boldbi-server-jobs`), `/bi/designer` (+ `/helper`) -> bi-designer (`boldbi-designer`).
+ETL, AI and MCP are not deployed yet and answer 503.
+
 ### Path Routing Map
 
 The Worker handles path-based routing matching Syncfusion's Nginx configuration:
@@ -71,3 +76,17 @@ Expect:
 ```
 
 Then open `https://<your-worker>.<subdomain>.workers.dev/ums/startup` in your browser.
+
+
+## Secrets for Bold BI (phase 1)
+
+Services share no disk on Cloudflare, so the vendor's S3 mode is used (`BOLD_SERVICES_STORAGETYPE=3`,
+`BOLD_SERVICES_PV_USED=false`). Set these with `npx wrangler secret put <NAME>` (never commit them):
+
+| Name | Purpose |
+|---|---|
+| `BOLD_SERVICES_AMAZON_BUCKET_NAME`, `BOLD_SERVICES_AMAZON_ROOTFOLDER_NAME`, `BOLD_SERVICES_AWS_REGION` | S3 location |
+| `BOLD_SERVICES_AWS_ACCESS_KEY_ID`, `BOLD_SERVICES_AWS_SECRET_ACCESS_KEY` | S3 credentials |
+| `BOLD_SERVICES_DB_HOST`, `BOLD_SERVICES_DB_PORT`, `BOLD_SERVICES_DB_NAME`, `BOLD_SERVICES_DB_USER`, `BOLD_SERVICES_DB_PASSWORD` | PostgreSQL (passed to id-ums only, as in the vendor manifests) |
+
+Not yet done: direct service-to-service URLs (`BI_*_SERVICE_URL`, `ID_*_SERVICE_URL`); services still call each other through the public URL.

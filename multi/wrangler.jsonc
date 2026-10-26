@@ -29,6 +29,34 @@
       "image_build_context": ".",
       "instance_type": "standard-2",
       "max_instances": 1
+    },
+    {
+      "class_name": "BiWebContainer",
+      "image": "./Dockerfile.bi-web",
+      "image_build_context": ".",
+      "instance_type": "standard-2",
+      "max_instances": 1
+    },
+    {
+      "class_name": "BiApiContainer",
+      "image": "./Dockerfile.bi-api",
+      "image_build_context": ".",
+      "instance_type": "standard-1",
+      "max_instances": 1
+    },
+    {
+      "class_name": "BiJobsContainer",
+      "image": "./Dockerfile.bi-jobs",
+      "image_build_context": ".",
+      "instance_type": "standard-1",
+      "max_instances": 1
+    },
+    {
+      "class_name": "BiDesignerContainer",
+      "image": "./Dockerfile.bi-designer",
+      "image_build_context": ".",
+      "instance_type": "standard-2",
+      "max_instances": 1
     }
   ],
   "durable_objects": {
@@ -44,6 +72,22 @@
       {
         "name": "ID_UMS_CONTAINER",
         "class_name": "IdUmsContainer"
+      },
+      {
+        "name": "BI_WEB_CONTAINER",
+        "class_name": "BiWebContainer"
+      },
+      {
+        "name": "BI_API_CONTAINER",
+        "class_name": "BiApiContainer"
+      },
+      {
+        "name": "BI_JOBS_CONTAINER",
+        "class_name": "BiJobsContainer"
+      },
+      {
+        "name": "BI_DESIGNER_CONTAINER",
+        "class_name": "BiDesignerContainer"
       }
     ]
   },
@@ -57,6 +101,22 @@
       "storage": "sqlite"
     },
     "IdUmsContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiWebContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiApiContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiJobsContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiDesignerContainer": {
       "type": "durable-object",
       "storage": "sqlite"
     }
