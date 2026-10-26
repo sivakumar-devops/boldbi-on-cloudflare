@@ -113,12 +113,13 @@ abstract class BoldServiceContainer extends BoldContainer {
   sleepAfter = "6h";
   enableInternet = true;
   protected withDatabase = false;
+  protected extraEnv: Record<string, string> = {};
 
   override async fetch(request: Request): Promise<Response> {
     if (!this.ctx.container?.running) {
       await this.startAndWaitForPorts({
         ports: 80,
-        startOptions: { envVars: buildContainerEnv(request.url, this.env, this.withDatabase) },
+        startOptions: { envVars: { ...buildContainerEnv(request.url, this.env, this.withDatabase), ...this.extraEnv } },
         cancellationOptions: { portReadyTimeoutMS: 180_000 },
       });
     }
@@ -134,7 +135,10 @@ export class IdUmsContainer extends BoldServiceContainer {
 export class BiWebContainer extends BoldServiceContainer {}
 export class BiApiContainer extends BoldServiceContainer {}
 export class BiJobsContainer extends BoldServiceContainer {}
-export class BiDesignerContainer extends BoldServiceContainer {}
+export class BiDesignerContainer extends BoldServiceContainer {
+  // The designer's entrypoint aborts with "INSTALL_OPTIONAL_LIBS: unbound variable" when this is unset.
+  protected override extraEnv = { INSTALL_OPTIONAL_LIBS: "mongodb,mysql,influxdb,snowflake,oracle,clickhouse,google" };
+}
 
 // Services not deployed yet: answer immediately so the apps' retry loops don't load the containers.
 const UNAVAILABLE_PREFIXES = ["/aiservice", "/mcp", "/etlservice"];
