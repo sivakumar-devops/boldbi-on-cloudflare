@@ -44,6 +44,8 @@ export function buildContainerEnv(requestUrl: string, env: MultiEnv, withDatabas
     APP_BASE_URL: env.APP_BASE_URL || `${url.protocol}//${url.host}`,
     BOLD_SERVICES_PV_USED: "false",
     BOLD_SERVICES_HOSTING_ENVIRONMENT: "docker",
+    // The entrypoint only writes local_service_url.json for a recognised DEPLOY_MODE (vendor compose value).
+    DEPLOY_MODE: "docker_multi_container",
   };
 
   // The vendor manifests point these at Kubernetes service names. Containers here cannot reach each
