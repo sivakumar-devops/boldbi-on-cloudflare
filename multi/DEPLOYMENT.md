@@ -20,7 +20,7 @@ Browser / API  ──► Cloudflare  ───┼───► IdApiContainer (sy
 Phase 1 adds the Bold BI core services (images from the vendor's multi-container compose file):
 `/bi` -> bi-web (`boldbi-server`), `/bi/api` -> bi-api (`boldbi-server-api`),
 `/bi/jobs` -> bi-jobs (`boldbi-server-jobs`), `/bi/designer` (+ `/helper`) -> bi-designer (`boldbi-designer`).
-ETL, AI and MCP are not deployed yet and answer 503.
+ETL (`/etlservice`, prefix stripped), AI (`/aiservice`, port 8080) and MCP (`/mcp`) each run in their own container, as in the vendor nginx config.
 
 ### Path Routing Map
 

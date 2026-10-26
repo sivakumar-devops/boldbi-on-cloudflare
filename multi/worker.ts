@@ -8,6 +8,9 @@ export interface MultiEnv {
   BI_API_CONTAINER: DurableObjectNamespace<BiApiContainer>;
   BI_JOBS_CONTAINER: DurableObjectNamespace<BiJobsContainer>;
   BI_DESIGNER_CONTAINER: DurableObjectNamespace<BiDesignerContainer>;
+  BI_ETL_CONTAINER: DurableObjectNamespace<BiEtlContainer>;
+  BOLD_AI_CONTAINER: DurableObjectNamespace<BoldAiContainer>;
+  BOLD_MCP_CONTAINER: DurableObjectNamespace<BoldMcpContainer>;
 
   // Optional overrides / secrets
   SERVICE_COMMUNICATION?: string; // "public_url" (default)
@@ -114,6 +117,7 @@ class BoldContainer extends Container<MultiEnv> {
 
 abstract class BoldServiceContainer extends BoldContainer {
   defaultPort = 80;
+  protected servicePort = 80;
   sleepAfter = "6h";
   enableInternet = true;
   protected withDatabase = false;
@@ -121,7 +125,7 @@ abstract class BoldServiceContainer extends BoldContainer {
   override async fetch(request: Request): Promise<Response> {
     if (!this.ctx.container?.running) {
       await this.startAndWaitForPorts({
-        ports: 80,
+        ports: this.servicePort,
         startOptions: { envVars: buildContainerEnv(request.url, this.env, this.withDatabase) },
         cancellationOptions: { portReadyTimeoutMS: 180_000 },
       });
@@ -139,9 +143,13 @@ export class BiWebContainer extends BoldServiceContainer {}
 export class BiApiContainer extends BoldServiceContainer {}
 export class BiJobsContainer extends BoldServiceContainer {}
 export class BiDesignerContainer extends BoldServiceContainer {}
+export class BiEtlContainer extends BoldServiceContainer {}
+export class BoldAiContainer extends BoldServiceContainer {
+  override defaultPort = 8080; // the AI service listens on 8080 (vendor nginx: proxy_pass bold-ai:8080)
+  protected override servicePort = 8080;
+}
+export class BoldMcpContainer extends BoldServiceContainer {}
 
-// Services not deployed yet: answer immediately so the apps' retry loops don't load the containers.
-const UNAVAILABLE_PREFIXES = ["/aiservice", "/mcp", "/etlservice"];
 const HEALTH_PATHS = new Set(["/health-check", "/api/health-check", "/ums/health-check"]);
 const HEALTH_TTL_MS = 5000;
 const healthCache = new Map<string, { at: number; status: number; body: string }>();
@@ -156,7 +164,7 @@ export default {
       return Response.json({
         ok: true,
         mode: "multi-container-spike",
-        services: ["id-web", "id-api", "id-ums", "bi-web", "bi-api", "bi-jobs", "bi-designer"],
+        services: ["id-web", "id-api", "id-ums", "bi-web", "bi-api", "bi-jobs", "bi-designer", "bi-etl", "bold-ai", "bold-mcp"],
       });
     }
 
@@ -170,10 +178,6 @@ export default {
         accessKeyId: { ...(shape(env.BOLD_SERVICES_AWS_ACCESS_KEY_ID) as object), first4: env.BOLD_SERVICES_AWS_ACCESS_KEY_ID?.slice(0, 4), last4: env.BOLD_SERVICES_AWS_ACCESS_KEY_ID?.slice(-4) },
         secretAccessKey: shape(env.BOLD_SERVICES_AWS_SECRET_ACCESS_KEY),
       });
-    }
-
-    if (UNAVAILABLE_PREFIXES.some((p) => path === p || path.startsWith(p + "/"))) {
-      return new Response("Service not deployed", { status: 503, headers: { "Retry-After": "60" } });
     }
 
     const cacheable = request.method === "GET" && HEALTH_PATHS.has(path);
@@ -194,7 +198,16 @@ export default {
     const under = (p: string) => path === p || path.startsWith(p + "/");
     let targetResponse: Response;
 
-    if (under("/bi/api")) {
+    if (under("/etlservice")) {
+      // Vendor nginx: location /etlservice/ { proxy_pass http://bi-etl/; } strips the prefix.
+      const target = new URL(request.url);
+      target.pathname = path.slice("/etlservice".length) || "/";
+      targetResponse = await env.BI_ETL_CONTAINER.getByName("bi-etl").fetch(new Request(target, forwardRequest));
+    } else if (under("/aiservice")) {
+      targetResponse = await env.BOLD_AI_CONTAINER.getByName("bold-ai").fetch(forwardRequest);
+    } else if (under("/mcp")) {
+      targetResponse = await env.BOLD_MCP_CONTAINER.getByName("bold-mcp").fetch(forwardRequest);
+    } else if (under("/bi/api")) {
       targetResponse = await env.BI_API_CONTAINER.getByName("bi-api").fetch(forwardRequest);
     } else if (under("/bi/jobs")) {
       targetResponse = await env.BI_JOBS_CONTAINER.getByName("bi-jobs").fetch(forwardRequest);

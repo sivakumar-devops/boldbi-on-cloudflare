@@ -22,12 +22,18 @@ function setup() {
   const biApiFetch = vi.fn(async () => new Response("bi-api-response"));
   const biJobsFetch = vi.fn(async () => new Response("bi-jobs-response"));
   const biDesignerFetch = vi.fn(async () => new Response("bi-designer-response"));
+  const etlFetch = vi.fn(async (_r: Request) => new Response("etl-response"));
+  const aiFetch = vi.fn(async () => new Response("ai-response"));
+  const mcpFetch = vi.fn(async () => new Response("mcp-response"));
 
   const env: MultiEnv = {
     BI_WEB_CONTAINER: { getByName: vi.fn(() => ({ fetch: biWebFetch })) } as never,
     BI_API_CONTAINER: { getByName: vi.fn(() => ({ fetch: biApiFetch })) } as never,
     BI_JOBS_CONTAINER: { getByName: vi.fn(() => ({ fetch: biJobsFetch })) } as never,
     BI_DESIGNER_CONTAINER: { getByName: vi.fn(() => ({ fetch: biDesignerFetch })) } as never,
+    BI_ETL_CONTAINER: { getByName: vi.fn(() => ({ fetch: etlFetch })) } as never,
+    BOLD_AI_CONTAINER: { getByName: vi.fn(() => ({ fetch: aiFetch })) } as never,
+    BOLD_MCP_CONTAINER: { getByName: vi.fn(() => ({ fetch: mcpFetch })) } as never,
     ID_WEB_CONTAINER: { getByName: vi.fn(() => ({ fetch: idWebFetch })) } as never,
     ID_API_CONTAINER: { getByName: vi.fn(() => ({ fetch: idApiFetch })) } as never,
     ID_UMS_CONTAINER: { getByName: vi.fn(() => ({ fetch: idUmsFetch })) } as never,
@@ -36,7 +42,7 @@ function setup() {
   const fetch = (path: string, init?: RequestInit) =>
     worker.fetch(new Request("https://app.example" + path, init), env);
 
-  return { env, fetch, idWebFetch, idApiFetch, idUmsFetch, biWebFetch, biApiFetch, biJobsFetch, biDesignerFetch };
+  return { env, fetch, idWebFetch, idApiFetch, idUmsFetch, biWebFetch, biApiFetch, biJobsFetch, biDesignerFetch, etlFetch, aiFetch, mcpFetch };
 }
 
 describe("multi routing tests", () => {
@@ -46,7 +52,7 @@ describe("multi routing tests", () => {
     expect(res.status).toBe(200);
     const json = await res.json() as { ok: boolean; services: string[] };
     expect(json.ok).toBe(true);
-    expect(json.services).toEqual(["id-web", "id-api", "id-ums", "bi-web", "bi-api", "bi-jobs", "bi-designer"]);
+    expect(json.services).toEqual(["id-web", "id-api", "id-ums", "bi-web", "bi-api", "bi-jobs", "bi-designer", "bi-etl", "bold-ai", "bold-mcp"]);
     expect(env.ID_WEB_CONTAINER.getByName).not.toHaveBeenCalled();
   });
 
@@ -99,14 +105,16 @@ describe("multi routing tests", () => {
     expect(sentReq.headers.get("X-Forwarded-Host")).toBe("app.example");
   });
 
-  it("returns 503 for services that are not deployed, without touching containers", async () => {
-    const { fetch, idWebFetch, idApiFetch, idUmsFetch } = setup();
-    for (const p of ["/aiservice", "/etlservice/x", "/mcp"]) {
-      expect((await fetch(p)).status).toBe(503);
-    }
-    expect(idWebFetch).not.toHaveBeenCalled();
-    expect(idApiFetch).not.toHaveBeenCalled();
-    expect(idUmsFetch).not.toHaveBeenCalled();
+  it("routes /etlservice (prefix stripped), /aiservice and /mcp to their containers", async () => {
+    const s = setup();
+    expect(await (await s.fetch("/etlservice/health-check?x=1")).text()).toBe("etl-response");
+    const sent = s.etlFetch.mock.calls[0][0];
+    expect(new URL(sent.url).pathname + new URL(sent.url).search).toBe("/health-check?x=1");
+    expect(await (await s.fetch("/etlservice")).text()).toBe("etl-response");
+    expect(new URL(s.etlFetch.mock.calls[1][0].url).pathname).toBe("/");
+    expect(await (await s.fetch("/aiservice/health-check")).text()).toBe("ai-response");
+    expect(await (await s.fetch("/mcp")).text()).toBe("mcp-response");
+    expect(s.idWebFetch).not.toHaveBeenCalled();
   });
 
   it("routes /bi paths to the right Bold BI container, longest prefix first", async () => {

@@ -57,6 +57,27 @@
       "image_build_context": ".",
       "instance_type": "standard-2",
       "max_instances": 1
+    },
+    {
+      "class_name": "BiEtlContainer",
+      "image": "./Dockerfile.bi-etl",
+      "image_build_context": ".",
+      "instance_type": "standard-2",
+      "max_instances": 1
+    },
+    {
+      "class_name": "BoldAiContainer",
+      "image": "./Dockerfile.bold-ai",
+      "image_build_context": ".",
+      "instance_type": "standard-1",
+      "max_instances": 1
+    },
+    {
+      "class_name": "BoldMcpContainer",
+      "image": "./Dockerfile.bold-mcp",
+      "image_build_context": ".",
+      "instance_type": "standard-1",
+      "max_instances": 1
     }
   ],
   "durable_objects": {
@@ -88,6 +109,18 @@
       {
         "name": "BI_DESIGNER_CONTAINER",
         "class_name": "BiDesignerContainer"
+      },
+      {
+        "name": "BI_ETL_CONTAINER",
+        "class_name": "BiEtlContainer"
+      },
+      {
+        "name": "BOLD_AI_CONTAINER",
+        "class_name": "BoldAiContainer"
+      },
+      {
+        "name": "BOLD_MCP_CONTAINER",
+        "class_name": "BoldMcpContainer"
       }
     ]
   },
@@ -117,6 +150,18 @@
       "storage": "sqlite"
     },
     "BiDesignerContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiEtlContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BoldAiContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BoldMcpContainer": {
       "type": "durable-object",
       "storage": "sqlite"
     }
