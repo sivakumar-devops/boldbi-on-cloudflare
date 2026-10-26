@@ -65,7 +65,13 @@ export class IdWebContainer extends Container<MultiEnv> {
   enableInternet = true;
 
   override async fetch(request: Request): Promise<Response> {
-    await this.start({ envVars: buildContainerEnv(request.url, this.env) });
+    if (!this.ctx.container?.running) {
+      await this.startAndWaitForPorts({
+        ports: 80,
+        startOptions: { envVars: buildContainerEnv(request.url, this.env) },
+        cancellationOptions: { portReadyTimeoutMS: 180_000 },
+      });
+    }
     return super.fetch(request);
   }
 }
@@ -76,7 +82,13 @@ export class IdApiContainer extends Container<MultiEnv> {
   enableInternet = true;
 
   override async fetch(request: Request): Promise<Response> {
-    await this.start({ envVars: buildContainerEnv(request.url, this.env) });
+    if (!this.ctx.container?.running) {
+      await this.startAndWaitForPorts({
+        ports: 80,
+        startOptions: { envVars: buildContainerEnv(request.url, this.env) },
+        cancellationOptions: { portReadyTimeoutMS: 180_000 },
+      });
+    }
     return super.fetch(request);
   }
 }
@@ -87,7 +99,13 @@ export class IdUmsContainer extends Container<MultiEnv> {
   enableInternet = true;
 
   override async fetch(request: Request): Promise<Response> {
-    await this.start({ envVars: buildContainerEnv(request.url, this.env) });
+    if (!this.ctx.container?.running) {
+      await this.startAndWaitForPorts({
+        ports: 80,
+        startOptions: { envVars: buildContainerEnv(request.url, this.env) },
+        cancellationOptions: { portReadyTimeoutMS: 180_000 },
+      });
+    }
     return super.fetch(request);
   }
 }
