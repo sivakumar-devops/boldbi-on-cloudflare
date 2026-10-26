@@ -11,7 +11,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { MultiEnv } from "./worker";
+import worker, { IdUmsContainer, MultiEnv } from "./worker";
 
 function setup() {
   const destroy = vi.fn(async () => undefined);
@@ -133,5 +133,16 @@ describe("multi routing tests", () => {
     expect(destroy).not.toHaveBeenCalled();
     expect((await post({ "X-Admin-Token": "s3cret" })).status).toBe(200);
     expect(destroy).toHaveBeenCalledTimes(3);
+  });
+
+  it("port readiness check treats a redirect as ready and does not follow it", async () => {
+    const portFetch = vi.fn(async (..._a: unknown[]) => new Response(null, { status: 302 }));
+    const ums = new IdUmsContainer(
+      { container: { running: true, getTcpPort: () => ({ fetch: portFetch }) } } as never,
+      {} as never,
+    );
+    await expect(ums.waitForPort({ portToCheck: 80, retries: 3 })).resolves.toBe(0);
+    expect(portFetch).toHaveBeenCalledTimes(1);
+    expect(portFetch.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
   });
 });
