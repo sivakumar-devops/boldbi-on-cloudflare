@@ -6,6 +6,7 @@ export interface MultiEnv {
   ID_UMS_CONTAINER: DurableObjectNamespace<IdUmsContainer>;
 
   // Optional overrides (for when Azure Postgres / R2 are configured)
+  SPIKE_FAKE_HEALTH?: string; // "true": answer health probes in the Worker (diagnostic only)
   SERVICE_COMMUNICATION?: string; // "public_url" (default)
   APP_BASE_URL?: string;
   BOLD_SERVICES_DB_HOST?: string;
@@ -132,6 +133,10 @@ export default {
 
     if (UNAVAILABLE_PREFIXES.some((p) => path === p || path.startsWith(p + "/"))) {
       return new Response("Service not deployed", { status: 503, headers: { "Retry-After": "60" } });
+    }
+
+    if (env.SPIKE_FAKE_HEALTH === "true" && request.method === "GET" && HEALTH_PATHS.has(path)) {
+      return new Response("OK (faked by Worker)", { status: 200, headers: { "Content-Type": "text/plain" } });
     }
 
     const cacheable = request.method === "GET" && HEALTH_PATHS.has(path);

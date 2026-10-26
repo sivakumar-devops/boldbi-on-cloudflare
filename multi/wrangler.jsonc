@@ -5,6 +5,9 @@
   "main": "worker.ts",
   "compatibility_date": "2026-10-16",
   "workers_dev": true,
+  "vars": {
+    "SPIKE_FAKE_HEALTH": "true"
+  },
   "observability": {
     "enabled": true
   },

@@ -107,4 +107,18 @@ describe("multi routing tests", () => {
     expect(res.status).toBe(200);
     expect(idApiFetch).toHaveBeenCalledTimes(1);
   });
+
+  it("fakes health probes without touching containers when SPIKE_FAKE_HEALTH=true", async () => {
+    const { env, idWebFetch, idApiFetch, idUmsFetch } = setup();
+    env.SPIKE_FAKE_HEALTH = "true";
+    for (const p of ["/health-check", "/api/health-check", "/ums/health-check"]) {
+      const res = await worker.fetch(new Request("https://app.example" + p), env);
+      expect(res.status).toBe(200);
+    }
+    expect(idWebFetch).not.toHaveBeenCalled();
+    expect(idApiFetch).not.toHaveBeenCalled();
+    expect(idUmsFetch).not.toHaveBeenCalled();
+    const real = await worker.fetch(new Request("https://app.example/ums/"), env);
+    expect(await real.text()).toBe("id-ums-response");
+  });
 });
