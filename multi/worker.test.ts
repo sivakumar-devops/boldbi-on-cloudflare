@@ -89,4 +89,22 @@ describe("multi routing tests", () => {
     expect(sentReq.headers.get("X-Forwarded-Proto")).toBe("https");
     expect(sentReq.headers.get("X-Forwarded-Host")).toBe("app.example");
   });
+
+  it("returns 503 for services that are not deployed, without touching containers", async () => {
+    const { fetch, idWebFetch, idApiFetch, idUmsFetch } = setup();
+    for (const p of ["/bi/jobs/health-check", "/reporting/jobs/health-check", "/aiservice"]) {
+      expect((await fetch(p)).status).toBe(503);
+    }
+    expect(idWebFetch).not.toHaveBeenCalled();
+    expect(idApiFetch).not.toHaveBeenCalled();
+    expect(idUmsFetch).not.toHaveBeenCalled();
+  });
+
+  it("caches successful health checks briefly", async () => {
+    const { fetch, idApiFetch } = setup();
+    await fetch("/api/health-check");
+    const res = await fetch("/api/health-check");
+    expect(res.status).toBe(200);
+    expect(idApiFetch).toHaveBeenCalledTimes(1);
+  });
 });

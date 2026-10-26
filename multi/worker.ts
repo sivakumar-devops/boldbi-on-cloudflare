@@ -110,6 +110,12 @@ export class IdUmsContainer extends Container<MultiEnv> {
   }
 }
 
+// Services not deployed yet: answer immediately so the apps' retry loops don't load the containers.
+const UNAVAILABLE_PREFIXES = ["/bi", "/reporting", "/aiservice", "/mcp", "/etlservice", "/reportsai", "/reportsmcp"];
+const HEALTH_PATHS = new Set(["/health-check", "/api/health-check", "/ums/health-check"]);
+const HEALTH_TTL_MS = 5000;
+const healthCache = new Map<string, { at: number; status: number; body: string }>();
+
 export default {
   async fetch(request: Request, env: MultiEnv): Promise<Response> {
     const publicUrl = new URL(request.url);
@@ -122,6 +128,18 @@ export default {
         mode: "multi-container-spike",
         services: ["id-web", "id-api", "id-ums"],
       });
+    }
+
+    if (UNAVAILABLE_PREFIXES.some((p) => path === p || path.startsWith(p + "/"))) {
+      return new Response("Service not deployed", { status: 503, headers: { "Retry-After": "60" } });
+    }
+
+    const cacheable = request.method === "GET" && HEALTH_PATHS.has(path);
+    if (cacheable) {
+      const hit = healthCache.get(path);
+      if (hit && Date.now() - hit.at < HEALTH_TTL_MS) {
+        return new Response(hit.body, { status: hit.status, headers: { "Content-Type": "text/plain" } });
+      }
     }
 
     const headers = new Headers(request.headers);
@@ -142,6 +160,10 @@ export default {
       targetResponse = await env.ID_UMS_CONTAINER.getByName("id-ums").fetch(forwardRequest);
     } else {
       targetResponse = await env.ID_WEB_CONTAINER.getByName("id-web").fetch(forwardRequest);
+    }
+
+    if (cacheable && targetResponse.status === 200) {
+      healthCache.set(path, { at: Date.now(), status: 200, body: await targetResponse.clone().text() });
     }
 
     return secureApplicationResponse(targetResponse, publicUrl);
