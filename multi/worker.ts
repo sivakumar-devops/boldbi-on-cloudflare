@@ -89,8 +89,9 @@ function secureApplicationResponse(response: Response, publicUrl: URL): Response
   return secured;
 }
 
-// The stock port check follows redirects. The apps redirect to their https base URL, which the
-// container runtime refuses to follow, so the check never succeeds. Any HTTP answer means "up".
+// The stock port check sends an HTTP request. Bold BI answers each one by resolving a tenant through
+// the IdP and S3 (several seconds), so the 5s probes time out and pile up and the container never
+// reports ready. A TCP connect is enough: Kestrel only listens once the app is up.
 class BoldContainer extends Container<MultiEnv> {
   override async waitForPort(waitOptions: Parameters<Container["waitForPort"]>[0]): Promise<number> {
     const tcpPort = this.ctx.container!.getTcpPort(waitOptions.portToCheck);
@@ -98,10 +99,9 @@ class BoldContainer extends Container<MultiEnv> {
     const tries = waitOptions.retries ?? Math.ceil(30_000 / interval);
     for (let i = 0; i < tries; i++) {
       try {
-        await tcpPort.fetch(`http://${this.pingEndpoint}`, {
-          redirect: "manual",
-          signal: AbortSignal.timeout(5000),
-        });
+        const socket = tcpPort.connect(`${this.pingEndpoint}:${waitOptions.portToCheck}`);
+        await socket.opened;
+        await socket.close();
         return i;
       } catch (e) {
         if (!this.ctx.container?.running || i === tries - 1) throw e;

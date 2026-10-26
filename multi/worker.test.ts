@@ -155,14 +155,13 @@ describe("multi routing tests", () => {
     expect(idApiFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("port readiness check treats a redirect as ready and does not follow it", async () => {
-    const portFetch = vi.fn(async (..._a: unknown[]) => new Response(null, { status: 302 }));
-    const ums = new IdUmsContainer(
-      { container: { running: true, getTcpPort: () => ({ fetch: portFetch }) } } as never,
-      {} as never,
-    );
+  it("port readiness check only needs a TCP connection, not an HTTP answer", async () => {
+    const close = vi.fn(async () => {});
+    const connect = vi.fn((_addr: string) => ({ opened: Promise.resolve(), close }));
+    const ums = new IdUmsContainer({ container: { running: true, getTcpPort: () => ({ connect }) } } as never, {} as never);
     await expect(ums.waitForPort({ portToCheck: 80, retries: 3 })).resolves.toBe(0);
-    expect(portFetch).toHaveBeenCalledTimes(1);
-    expect(portFetch.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenCalledWith("ping:80");
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });
