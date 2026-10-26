@@ -46,21 +46,9 @@ export function buildContainerEnv(requestUrl: string, env: MultiEnv, withDatabas
     BOLD_SERVICES_HOSTING_ENVIRONMENT: "docker",
     // The entrypoint only writes local_service_url.json for a recognised DEPLOY_MODE (vendor compose value).
     DEPLOY_MODE: "docker_multi_container",
+    INSTALL_OPTIONAL_LIBS: "mongodb,mysql,influxdb,snowflake,oracle,clickhouse,google",
+    BOLD_SERVICES_CONSOLE_LOG_ENABLED: "true",
   };
-
-  // The vendor manifests point these at Kubernetes service names. Containers here cannot reach each
-  // other directly, so use the public URL, which the Worker routes to the right container.
-  const base = vars.APP_BASE_URL.replace(/\/+$/, "");
-  Object.assign(vars, {
-    ID_WEB_SERVICE_URL: base,
-    ID_API_SERVICE_URL: `${base}/api`,
-    ID_UMS_SERVICE_URL: `${base}/ums`,
-    BI_WEB_SERVICE_URL: `${base}/bi`,
-    BI_API_SERVICE_URL: `${base}/bi/api`,
-    BI_JOBS_SERVICE_URL: `${base}/bi/jobs`,
-    BI_DESIGNER_SERVICE_URL: `${base}/bi/designer`,
-    BI_DESIGNER_HELPER_SERVICE_URL: `${base}/bi/designer/helper`,
-  });
 
   if (env.BOLD_SERVICES_AMAZON_BUCKET_NAME) {
     vars.BOLD_SERVICES_STORAGETYPE = "3";
@@ -129,13 +117,12 @@ abstract class BoldServiceContainer extends BoldContainer {
   sleepAfter = "6h";
   enableInternet = true;
   protected withDatabase = false;
-  protected extraEnv: Record<string, string> = {};
 
   override async fetch(request: Request): Promise<Response> {
     if (!this.ctx.container?.running) {
       await this.startAndWaitForPorts({
         ports: 80,
-        startOptions: { envVars: { ...buildContainerEnv(request.url, this.env, this.withDatabase), ...this.extraEnv } },
+        startOptions: { envVars: buildContainerEnv(request.url, this.env, this.withDatabase) },
         cancellationOptions: { portReadyTimeoutMS: 180_000 },
       });
     }
@@ -151,10 +138,7 @@ export class IdUmsContainer extends BoldServiceContainer {
 export class BiWebContainer extends BoldServiceContainer {}
 export class BiApiContainer extends BoldServiceContainer {}
 export class BiJobsContainer extends BoldServiceContainer {}
-export class BiDesignerContainer extends BoldServiceContainer {
-  // The designer's entrypoint aborts with "INSTALL_OPTIONAL_LIBS: unbound variable" when this is unset.
-  protected override extraEnv = { INSTALL_OPTIONAL_LIBS: "mongodb,mysql,influxdb,snowflake,oracle,clickhouse,google" };
-}
+export class BiDesignerContainer extends BoldServiceContainer {}
 
 // Services not deployed yet: answer immediately so the apps' retry loops don't load the containers.
 const UNAVAILABLE_PREFIXES = ["/aiservice", "/mcp", "/etlservice"];
