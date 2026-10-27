@@ -158,3 +158,20 @@ Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=all"      
 Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=id-api,id-ums"  # selected services
 ```
 The next request to each service starts a fresh container.
+
+## Placement (Durable Object location hint)
+
+Every service is resolved through one function (`serviceStub` in `worker.ts`), so public routing, internal forwarding and the
+restart/diagnostic endpoints all use the same Durable Object name and the same `locationHint`. A container is placed near its Durable Object.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DO_LOCATION_HINT` | `apac` | `wnam enam sam weur eeur apac apac-ne apac-se oc afr me`, or `none` to send no hint. An unknown value falls back to `apac`. |
+| `DO_NAME_SUFFIX` | empty | Appended to every object name (`bi-web` becomes `bi-web-v2`). |
+
+Limits (Cloudflare behaviour, not guaranteed by this code):
+- A hint is best effort and names a region, not a city. It applies only when a Durable Object is **first created**.
+- Existing objects keep their location, and restarting a container does not move it. To relocate, set a new `DO_NAME_SUFFIX`, which creates new objects.
+  The old objects and containers stay until `sleepAfter` (6h) expires or they are destroyed. State lives in PostgreSQL and S3, not in the containers.
+- Check the result with `GET /_internal/diag/trace?host=all` and `npx wrangler containers instances <id>`. If the services still spread across cities, try a narrower hint (`apac-se`) with a new suffix.
+- To move to the US later: set `DO_LOCATION_HINT=enam` (or `wnam`) and change `DO_NAME_SUFFIX`.

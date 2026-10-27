@@ -19,6 +19,8 @@ export interface MultiEnv {
   SERVICE_COMMUNICATION?: string; // "internal" (default) | "public_url"
   INTERNAL_SERVICE_KEYS?: string; // optional: limit internal mode to these keys (troubleshooting)
   APP_BASE_URL?: string;
+  DO_LOCATION_HINT?: string; // Durable Object location hint: apac (default) | apac-se | apac-ne | enam | ... | none
+  DO_NAME_SUFFIX?: string; // optional, e.g. "v2": new Durable Object names, so new objects get created (and hinted)
   ADMIN_TOKEN?: string; // enables POST /_internal/restart and /_internal/diag/*
   DIAG_ENABLED?: string; // "true" records timing for internal calls (Server-Timing header + structured console.log)
 
@@ -263,20 +265,36 @@ function withTiming(response: Response, value: string): Response {
 
 // Internal hostname -> container. Used for intercepted container-to-container calls.
 let lastPublicBase = "";
+const LOCATION_HINTS = ["wnam", "enam", "sam", "weur", "eeur", "apac", "apac-ne", "apac-se", "oc", "afr", "me"] as const;
+type LocationHint = (typeof LOCATION_HINTS)[number];
+
+// A hint only applies when a Durable Object is first created, and it is best effort (a region, not a city).
+// Existing objects keep their location; a new DO_NAME_SUFFIX creates new objects that honour the hint.
+export function locationHintFor(env: Pick<MultiEnv, "DO_LOCATION_HINT">): LocationHint | undefined {
+  const v = (env.DO_LOCATION_HINT ?? "apac").trim().toLowerCase();
+  if (v === "none" || v === "") return undefined;
+  return (LOCATION_HINTS as readonly string[]).includes(v) ? (v as LocationHint) : "apac";
+}
+
+const SERVICE_BINDINGS: Record<string, keyof MultiEnv> = {
+  "id-web": "ID_WEB_CONTAINER", "id-api": "ID_API_CONTAINER", "id-ums": "ID_UMS_CONTAINER",
+  "bi-web": "BI_WEB_CONTAINER", "bi-api": "BI_API_CONTAINER", "bi-jobs": "BI_JOBS_CONTAINER",
+  "bi-designer": "BI_DESIGNER_CONTAINER", "bi-etl": "BI_ETL_CONTAINER",
+  "bold-ai": "BOLD_AI_CONTAINER", "bold-mcp": "BOLD_MCP_CONTAINER",
+};
+
+// The single place that resolves a service name to its Durable Object (and so its container).
+export function serviceStub(env: MultiEnv, host: string): { fetch(r: Request): Promise<Response> } | undefined {
+  const binding = SERVICE_BINDINGS[host];
+  if (!binding) return undefined;
+  const ns = env[binding] as unknown as DurableObjectNamespace;
+  const suffix = (env.DO_NAME_SUFFIX ?? "").trim();
+  const hint = locationHintFor(env);
+  return ns.getByName(suffix ? `${host}-${suffix}` : host, hint ? { locationHint: hint } : undefined);
+}
+
 function internalTarget(env: MultiEnv, host: string): { fetch(r: Request): Promise<Response> } | undefined {
-  switch (host) {
-    case "id-web": return env.ID_WEB_CONTAINER.getByName("id-web");
-    case "id-api": return env.ID_API_CONTAINER.getByName("id-api");
-    case "id-ums": return env.ID_UMS_CONTAINER.getByName("id-ums");
-    case "bi-web": return env.BI_WEB_CONTAINER.getByName("bi-web");
-    case "bi-api": return env.BI_API_CONTAINER.getByName("bi-api");
-    case "bi-jobs": return env.BI_JOBS_CONTAINER.getByName("bi-jobs");
-    case "bi-designer": return env.BI_DESIGNER_CONTAINER.getByName("bi-designer");
-    case "bi-etl": return env.BI_ETL_CONTAINER.getByName("bi-etl");
-    case "bold-ai": return env.BOLD_AI_CONTAINER.getByName("bold-ai");
-    case "bold-mcp": return env.BOLD_MCP_CONTAINER.getByName("bold-mcp");
-  }
-  return undefined;
+  return serviceStub(env, host);
 }
 
 // Samples kept per isolate (best effort: the outbound handler may run in a different isolate than the public
@@ -553,25 +571,25 @@ export default {
       // Vendor nginx: location /etlservice/ { proxy_pass http://bi-etl/; } strips the prefix.
       const target = new URL(request.url);
       target.pathname = path.slice("/etlservice".length) || "/";
-      targetResponse = await env.BI_ETL_CONTAINER.getByName("bi-etl").fetch(new Request(target, forwardRequest));
+      targetResponse = await serviceStub(env, "bi-etl")!.fetch(new Request(target, forwardRequest));
     } else if (under("/aiservice")) {
-      targetResponse = await env.BOLD_AI_CONTAINER.getByName("bold-ai").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bold-ai")!.fetch(forwardRequest);
     } else if (under("/mcp")) {
-      targetResponse = await env.BOLD_MCP_CONTAINER.getByName("bold-mcp").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bold-mcp")!.fetch(forwardRequest);
     } else if (under("/bi/api")) {
-      targetResponse = await env.BI_API_CONTAINER.getByName("bi-api").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bi-api")!.fetch(forwardRequest);
     } else if (under("/bi/jobs")) {
-      targetResponse = await env.BI_JOBS_CONTAINER.getByName("bi-jobs").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bi-jobs")!.fetch(forwardRequest);
     } else if (under("/bi/designer")) {
-      targetResponse = await env.BI_DESIGNER_CONTAINER.getByName("bi-designer").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bi-designer")!.fetch(forwardRequest);
     } else if (under("/bi")) {
-      targetResponse = await env.BI_WEB_CONTAINER.getByName("bi-web").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bi-web")!.fetch(forwardRequest);
     } else if (under("/api")) {
-      targetResponse = await env.ID_API_CONTAINER.getByName("id-api").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "id-api")!.fetch(forwardRequest);
     } else if (under("/ums")) {
-      targetResponse = await env.ID_UMS_CONTAINER.getByName("id-ums").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "id-ums")!.fetch(forwardRequest);
     } else {
-      targetResponse = await env.ID_WEB_CONTAINER.getByName("id-web").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "id-web")!.fetch(forwardRequest);
     }
 
     if (cacheable && targetResponse.status === 200) {

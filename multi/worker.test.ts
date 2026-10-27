@@ -16,7 +16,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport, locationHintFor, serviceStub } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -344,5 +344,35 @@ describe("diag curl local mode", () => {
     expect(script).toContain("http://127.0.0.1:80/api/health-check");
     expect(script).toContain("X-Forwarded-Host: app.example");
     expect(script).not.toContain("http://id-api");
+  });
+});
+
+describe("Durable Object placement", () => {
+  it("defaults to apac, accepts valid hints, falls back to apac on junk, and none disables", () => {
+    expect(locationHintFor({})).toBe("apac");
+    expect(locationHintFor({ DO_LOCATION_HINT: "APAC-SE" })).toBe("apac-se");
+    expect(locationHintFor({ DO_LOCATION_HINT: "enam" })).toBe("enam");
+    expect(locationHintFor({ DO_LOCATION_HINT: "mars" })).toBe("apac");
+    expect(locationHintFor({ DO_LOCATION_HINT: "none" })).toBeUndefined();
+  });
+
+  it("passes the same hint for every service, public and internal", async () => {
+    const { env, fetch } = setup();
+    for (const p of ["/", "/api/x", "/ums/x", "/bi", "/bi/api/x", "/bi/jobs/x", "/bi/designer", "/etlservice/x", "/aiservice/x", "/mcp"]) await fetch(p);
+    await forwardInternal(new Request("http://id-api/api/x"), env);
+    const all = [env.ID_WEB_CONTAINER, env.ID_API_CONTAINER, env.ID_UMS_CONTAINER, env.BI_WEB_CONTAINER, env.BI_API_CONTAINER,
+      env.BI_JOBS_CONTAINER, env.BI_DESIGNER_CONTAINER, env.BI_ETL_CONTAINER, env.BOLD_AI_CONTAINER, env.BOLD_MCP_CONTAINER];
+    for (const ns of all) {
+      const calls = (ns.getByName as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      for (const c of calls) expect(c[1]).toEqual({ locationHint: "apac" });
+    }
+  });
+
+  it("DO_NAME_SUFFIX renames objects consistently; unknown hosts return undefined", () => {
+    const { env } = setup();
+    serviceStub({ ...env, DO_NAME_SUFFIX: "v2", DO_LOCATION_HINT: "none" }, "bi-web");
+    expect((env.BI_WEB_CONTAINER.getByName as unknown as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(["bi-web-v2", undefined]);
+    expect(serviceStub(env, "nope")).toBeUndefined();
   });
 });
