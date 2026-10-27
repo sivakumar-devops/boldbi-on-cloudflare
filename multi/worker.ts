@@ -16,8 +16,8 @@ export interface MultiEnv {
   BOLD_MCP_CONTAINER: DurableObjectNamespace<BoldMcpContainer>;
 
   // Optional overrides / secrets
-  INTERNAL_SERVICE_KEYS?: string;
-  SERVICE_COMMUNICATION?: string; // "public_url" = every service call goes via the public URL; default = internal routing
+  SERVICE_COMMUNICATION?: string; // "internal" (default) | "public_url"
+  INTERNAL_SERVICE_KEYS?: string; // optional: limit internal mode to these keys (troubleshooting)
   APP_BASE_URL?: string;
   ADMIN_TOKEN?: string; // enables POST /_internal/restart
 
@@ -105,45 +105,78 @@ class BoldContainer extends Container<MultiEnv> {
   }
 }
 
-// The vendor entrypoint writes local_service_url.json with Docker hostnames (http://id-api/api, ...),
-// which do not resolve on Cloudflare. Write it first with the public URLs (the Worker routes them);
-// the vendor script leaves the file alone when it already has the Mcp/ReportsAi/ReportsMcp nodes.
-const SERVICE_URL_PATHS: Record<string, string> = {
-  Idp: "", IdpApi: "/api", Ums: "/ums", Bi: "/bi", BiApi: "/bi/api", BiJob: "/bi/jobs",
-  BiDesigner: "/bi/designer", BiDesignerHelper: "/bi/designer/helper", Etl: "/etlservice",
-  EtlBlazor: "/etlservice/framework/blazor.server.js", Ai: "/aiservice", Mcp: "/mcp",
-  Reports: "/reporting", ReportsApi: "/reporting/api", ReportsJob: "/reporting/jobs",
-  ReportsService: "/reporting/reportservice", ReportsViewer: "/reporting/viewer",
-  ReportsAi: "/reportsai", ReportsMcp: "/reportsmcp",
-};
-// Server-to-server URLs sent to internal hostnames by default. The container's outbound HTTP for these hosts is
-// intercepted (see OUTBOUND_HOSTS) and delivered straight to the target Durable Object, skipping the public
-// edge. Browser-facing URLs (Idp, Ums, Bi, ...) stay public because the browser follows them.
-//   SERVICE_COMMUNICATION=public_url  -> every URL is public (no internal routing)
-//   unset / "internal" (default)      -> the keys below use internal URLs
-//   INTERNAL_SERVICE_KEYS="IdpApi,BiApi,BiJob"  -> optional override of which keys are internal
-export const INTERNAL_SERVICE_URLS: Record<string, string> = {
-  IdpApi: "http://id-api/api",
-  BiApi: "http://bi-api/bi/api",
-  BiJob: "http://bi-jobs/bi/jobs",
+// local_service_url.json: where each Bold service reaches the others.
+//
+// The vendor entrypoint (DEPLOY_MODE=docker_multi_container) writes Docker hostnames, which do not exist on
+// Cloudflare, so we write the file first (the vendor script keeps an existing file that has no localhost/port
+// and contains the Mcp/ReportsAi/ReportsMcp nodes). In the vendor's own Docker, ECS and Kubernetes modes EVERY key
+// holds an address that only containers can reach (e.g. http://id-web-service:6000), so this file is
+// backend-only; browser URLs come from APP_BASE_URL and the tenant domain. All keys can therefore be internal.
+//
+//   public:   the Worker's public URL + path (the Worker routes it) - used by SERVICE_COMMUNICATION=public_url
+//   internal: http://<service-host><path> - the container's outbound call to <service-host> is intercepted
+//             (outboundByHost, see OUTBOUND_HOSTS) and delivered straight to the target Durable Object.
+//             Hosts and paths mirror the vendor's docker_multi_container block (the ETL prefix is not used
+//             internally because the vendor nginx strips /etlservice).
+export const SERVICE_URLS: Record<string, { publicPath: string; internal: string }> = {
+  Idp: { publicPath: "", internal: "http://id-web" },
+  IdpApi: { publicPath: "/api", internal: "http://id-api/api" },
+  Ums: { publicPath: "/ums", internal: "http://id-ums/ums" },
+  Bi: { publicPath: "/bi", internal: "http://bi-web/bi" },
+  BiApi: { publicPath: "/bi/api", internal: "http://bi-api/bi/api" },
+  BiJob: { publicPath: "/bi/jobs", internal: "http://bi-jobs/bi/jobs" },
+  BiDesigner: { publicPath: "/bi/designer", internal: "http://bi-designer/bi/designer" },
+  BiDesignerHelper: { publicPath: "/bi/designer/helper", internal: "http://bi-designer/bi/designer/helper" },
+  Etl: { publicPath: "/etlservice", internal: "http://bi-etl" },
+  EtlBlazor: { publicPath: "/etlservice/framework/blazor.server.js", internal: "http://bi-etl/framework/blazor.server.js" },
+  Ai: { publicPath: "/aiservice", internal: "http://bold-ai/aiservice" },
+  Mcp: { publicPath: "/mcp", internal: "http://bold-mcp/mcp" },
+  // Bold Reports services are not part of this deployment (no containers); names follow the vendor block.
+  Reports: { publicPath: "/reporting", internal: "http://reports-web/reporting" },
+  ReportsApi: { publicPath: "/reporting/api", internal: "http://reports-api/reporting/api" },
+  ReportsJob: { publicPath: "/reporting/jobs", internal: "http://reports-jobs/reporting/jobs" },
+  ReportsService: { publicPath: "/reporting/reportservice", internal: "http://reports-reportservice/reporting/reportservice" },
+  ReportsViewer: { publicPath: "/reporting/viewer", internal: "http://reports-viewer/reporting/viewer" },
+  ReportsAi: { publicPath: "/reportsai", internal: "http://reports-ai/reportsai" },
+  ReportsMcp: { publicPath: "/reportsmcp", internal: "http://reports-mcp/reportsmcp" },
 };
 
+export type CommunicationMode = "internal" | "public_url";
+
+export function communicationMode(env: Pick<MultiEnv, "SERVICE_COMMUNICATION">): CommunicationMode {
+  return (env.SERVICE_COMMUNICATION ?? "").trim().toLowerCase() === "public_url" ? "public_url" : "internal";
+}
+
+// Keys that use internal URLs. Default (internal mode): all of them. INTERNAL_SERVICE_KEYS (optional, comma
+// separated) restricts internal mode to the listed keys for troubleshooting; the others stay public.
+export function internalKeysFor(env: Pick<MultiEnv, "SERVICE_COMMUNICATION" | "INTERNAL_SERVICE_KEYS">): string[] {
+  if (communicationMode(env) === "public_url") return [];
+  const all = Object.keys(SERVICE_URLS);
+  if (!env.INTERNAL_SERVICE_KEYS?.trim()) return all;
+  const wanted = env.INTERNAL_SERVICE_KEYS.split(",").map((k) => k.trim());
+  return all.filter((k) => wanted.includes(k));
+}
+
+export function buildServiceUrls(baseUrl: string, internalKeys: string[]): Record<string, string> {
+  const base = baseUrl.replace(/\/+$/, "");
+  return Object.fromEntries(
+    Object.entries(SERVICE_URLS).map(([k, v]) => [k, internalKeys.includes(k) ? v.internal : `${base}${v.publicPath}`]),
+  );
+}
+
+// The entrypoint override: writes the URL file from APP_BASE_URL (set per request), then runs the vendor script.
 export function buildServiceEntrypoint(internalKeys: string[]): string[] {
-  const urls = Object.entries(SERVICE_URL_PATHS)
-    .map(([k, p]) => `"${k}":"${(internalKeys.includes(k) && INTERNAL_SERVICE_URLS[k]) || `$base${p}`}"`)
-    .join(",");
+  const json = JSON.stringify(
+    Object.fromEntries(
+      Object.entries(SERVICE_URLS).map(([k, v]) => [k, internalKeys.includes(k) ? v.internal : `\u0024base${v.publicPath}`]),
+    ),
+  ).replace(/\\u0024/g, "$");
   return [
     "bash",
     "-c",
     `set -eu; base="\${APP_BASE_URL%/}"; dir=/application/app_data/configuration; mkdir -p "$dir"; chmod 777 "$dir"; ` +
-      `printf '%s' "{${urls.replace(/"/g, '\\"')}}" > "$dir/local_service_url.json"; exec bash entrypoint.sh`,
+      `printf '%s' "${json.replace(/"/g, '\\"')}" > "$dir/local_service_url.json"; exec bash entrypoint.sh`,
   ];
-}
-
-export function internalKeysFor(env: Pick<MultiEnv, "SERVICE_COMMUNICATION" | "INTERNAL_SERVICE_KEYS">): string[] {
-  if ((env.SERVICE_COMMUNICATION ?? "").trim().toLowerCase() === "public_url") return [];
-  if (env.INTERNAL_SERVICE_KEYS) return env.INTERNAL_SERVICE_KEYS.split(",").map((k) => k.trim()).filter((k) => k in INTERNAL_SERVICE_URLS);
-  return Object.keys(INTERNAL_SERVICE_URLS);
 }
 
 // TEMPORARY diagnostic: health-check paths per internal host, used by /_internal/ping-internal.

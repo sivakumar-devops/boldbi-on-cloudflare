@@ -93,23 +93,46 @@ Database settings are not stored as secrets: enter them manually on the UMS star
 How service URLs work: each container is started with an entrypoint override (`SERVICE_ENTRYPOINT` in `worker.ts`) that writes
 `local_service_url.json` with the public URLs before running the vendor `entrypoint.sh`. This replaces the former custom Dockerfiles.
 
-## Internal service-to-service routing
+## Service-to-service communication (`SERVICE_COMMUNICATION`)
 
-`IdpApi`, `BiApi` and `BiJob` in `local_service_url.json` point to internal hostnames (`http://id-api/api`, `http://bi-api/bi/api`,
-`http://bi-jobs/bi/jobs`). Each container class registers `outboundByHost` handlers (`@cloudflare/containers`), so these calls are
-intercepted and delivered straight to the target Durable Object instead of leaving through the public edge and coming back.
-The forwarded request carries `X-Forwarded-Host`/`X-Forwarded-Proto` of the public URL. Browser-facing URLs (`Idp`, `Ums`, `Bi`, ...) stay public.
+Bold BI services find each other through `local_service_url.json`. The Worker writes it when each container starts
+(an entrypoint override, then the vendor `entrypoint.sh`, which keeps an existing file).
 
-Variables (set with `npx wrangler secret put <NAME>`, or `vars` in `wrangler.jsonc`; read when a container starts):
+| `SERVICE_COMMUNICATION` | Result |
+|---|---|
+| unset or `internal` (**default**) | **All 19 keys** use internal hosts, e.g. `IdpApi=http://id-api/api`, `BiApi=http://bi-api/bi/api`, `Etl=http://bi-etl`, `Ai=http://bold-ai/aiservice`, `Mcp=http://bold-mcp/mcp` |
+| `public_url` | All 19 keys use the public URL, e.g. `IdpApi=https://<worker>/api` |
 
-| Name | Value | Effect |
-|---|---|---|
-| `SERVICE_COMMUNICATION` | unset or `internal` (default) | `IdpApi`, `BiApi`, `BiJob` use internal URLs |
-| `SERVICE_COMMUNICATION` | `public_url` | every service URL is the public URL |
-| `INTERNAL_SERVICE_KEYS` | e.g. `IdpApi,BiApi` | optional subset of the three keys to keep internal (ignored when `public_url`) |
+`INTERNAL_SERVICE_KEYS` (optional, comma separated, e.g. `IdpApi,BiApi`) limits internal mode to the listed keys and keeps the rest
+public. It is for troubleshooting only, is empty by default, and is ignored in `public_url` mode.
 
-After changing either, restart the containers so the URL file is rewritten:
-`Invoke-RestMethod -Method Post -Headers @{ "X-Admin-Token" = "<token>" } "$b/_internal/restart?host=all"`.
+Set with `npx wrangler secret put SERVICE_COMMUNICATION` (or `vars` in `wrangler.jsonc`). The file is written at container start,
+so restart the containers after changing it:
+`Invoke-RestMethod -Method Post -Headers @{ "X-Admin-Token" = "<token>" } "$b/_internal/restart?host=all"` (needs the `ADMIN_TOKEN` secret).
+
+### How internal calls work on Cloudflare
+
+Cloudflare containers have no shared network, so Docker hostnames do not resolve. Each container class sets `outboundByHost` for
+`id-web, id-api, id-ums, bi-web, bi-api, bi-jobs, bi-designer, bi-etl, bold-ai, bold-mcp` (`@cloudflare/containers`, and the Worker
+exports `ContainerProxy`). When a container calls `http://id-api/...`, the platform hands the request to the Worker, which forwards it
+to that service's Durable Object and container (`forwardInternal`). The call never leaves Cloudflare and skips DNS, TLS and the public edge.
+`X-Forwarded-Host` and `X-Forwarded-Proto` carry the public values, so the app still resolves the tenant by the public hostname.
+The target port is the service's own (80, or 8080 for `bold-ai`).
+
+### Browser-facing URLs
+
+The vendor writes this file for containers only: in its Docker, ECS and Kubernetes modes every key is a cluster-internal address
+(`http://id-web-service:6000`, ...), so no key is a browser URL. Browser URLs come from `APP_BASE_URL` (also used for `product.json`) and the
+tenant domain, and these stay public in every mode. I confirmed this from the vendor `entrypoint.sh`, not from the compiled application,
+so a key that the application hands to the browser would break in internal mode. Use `INTERNAL_SERVICE_KEYS` or `public_url` to isolate it.
+
+### Limitations
+
+- Interception is HTTP only (`http://` URLs). WebSocket/SignalR traffic over an intercepted host (Blazor for ETL, designer) is untested.
+- The `Reports*` keys point at hosts with no container in this deployment; they are written for completeness and are unreachable.
+- Calls to the database, S3 and other external hosts are unchanged (they leave the container directly).
+- Internal hops still pass through the Worker and a Durable Object, so latency is lower than the public path, not Docker-network speed.
+- Containers run in a Cloudflare location of Cloudflare's choosing (NRT in the logs), so database/S3 distance is unaffected by this setting.
 
 Timing: every proxied response carries a `Server-Timing` header (`container-start`, `container-app`, `worker-total`).
 

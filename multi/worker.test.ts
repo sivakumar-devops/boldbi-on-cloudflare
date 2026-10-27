@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 vi.mock("@cloudflare/containers", () => ({
   ContainerProxy: class {},
@@ -12,7 +16,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, forwardInternal, OUTBOUND_HOSTS, BiApiContainer } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -152,19 +156,82 @@ describe("multi routing tests", () => {
     expect(buildContainerEnv("https://a/", {} as MultiEnv)).not.toHaveProperty("BOLD_SERVICES_STORAGETYPE");
   });
 
-  it("entrypoint writes public URLs when internal routing is off", () => {
-    const script = buildServiceEntrypoint([])[2];
-    expect(script).toContain('base="${APP_BASE_URL%/}"');
-    expect(script).toContain('\\"IdpApi\\":\\"$base/api\\"');
-    expect(script).toContain("exec bash entrypoint.sh");
+  // Runs the generated entrypoint with the final `exec bash entrypoint.sh` swapped for `true`
+  // and returns the parsed local_service_url.json the container would see.
+  function renderUrlFile(env: Partial<MultiEnv>, appBaseUrl = "https://app.example/"): Record<string, string> {
+    const dir = mkdtempSync(join(tmpdir(), "urls-"));
+    try {
+      const script = buildServiceEntrypoint(internalKeysFor(env))[2]
+        .replace("/application/app_data/configuration", `${dir}/configuration`)
+        .replace("exec bash entrypoint.sh", "true");
+      execFileSync("bash", ["-c", script], { env: { ...process.env, APP_BASE_URL: appBaseUrl } });
+      return JSON.parse(readFileSync(`${dir}/configuration/local_service_url.json`, "utf8"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const ALL_KEYS = [
+    "Idp", "IdpApi", "Ums", "Bi", "BiApi", "BiJob", "BiDesigner", "BiDesignerHelper", "Etl", "EtlBlazor",
+    "Ai", "Mcp", "Reports", "ReportsApi", "ReportsJob", "ReportsService", "ReportsViewer", "ReportsAi", "ReportsMcp",
+  ];
+
+  it("internal mode (default) writes internal URLs for ALL keys", () => {
+    for (const env of [{}, { SERVICE_COMMUNICATION: "internal" }, { SERVICE_COMMUNICATION: "bogus" }]) {
+      const json = renderUrlFile(env);
+      expect(Object.keys(json)).toEqual(ALL_KEYS);
+      for (const [k, v] of Object.entries(json)) {
+        expect(v, k).toMatch(/^http:\/\/[a-z-]+(\/|$)/);
+        expect(v, k).not.toContain("app.example");
+      }
+      expect(json).toMatchObject({
+        Idp: "http://id-web", IdpApi: "http://id-api/api", Ums: "http://id-ums/ums", Bi: "http://bi-web/bi",
+        BiApi: "http://bi-api/bi/api", BiJob: "http://bi-jobs/bi/jobs", BiDesigner: "http://bi-designer/bi/designer",
+        Etl: "http://bi-etl", EtlBlazor: "http://bi-etl/framework/blazor.server.js",
+        Ai: "http://bold-ai/aiservice", Mcp: "http://bold-mcp/mcp",
+      });
+    }
   });
 
-  it("entrypoint uses internal hosts for server-to-server URLs only", () => {
-    const script = buildServiceEntrypoint(internalKeysFor({}))[2];
-    expect(script).toContain('\\"IdpApi\\":\\"http://id-api/api\\"');
-    expect(script).toContain('\\"BiApi\\":\\"http://bi-api/bi/api\\"');
-    expect(script).toContain('\\"Idp\\":\\"$base\\"');
-    expect(script).toContain('\\"Ums\\":\\"$base/ums\\"');
+  it("internal hosts all resolve to a container the Worker can forward to", () => {
+    const hosts = new Set(Object.values(renderUrlFile({})).filter((u) => !/reports/.test(u)).map((u) => new URL(u).hostname));
+    for (const h of hosts) expect(OUTBOUND_HOSTS, h).toContain(h);
+  });
+
+  it("public_url mode writes the public URL for ALL keys", () => {
+    const json = renderUrlFile({ SERVICE_COMMUNICATION: "public_url" });
+    expect(Object.keys(json)).toEqual(ALL_KEYS);
+    for (const v of Object.values(json)) expect(v).toMatch(/^https:\/\/app\.example(\/|$)/);
+    expect(json).toMatchObject({
+      Idp: "https://app.example", IdpApi: "https://app.example/api", Ums: "https://app.example/ums",
+      BiApi: "https://app.example/bi/api", Etl: "https://app.example/etlservice",
+      EtlBlazor: "https://app.example/etlservice/framework/blazor.server.js", Ai: "https://app.example/aiservice",
+      Mcp: "https://app.example/mcp",
+    });
+  });
+
+  it("SERVICE_COMMUNICATION is case/space tolerant and INTERNAL_SERVICE_KEYS is ignored in public_url mode", () => {
+    const json = renderUrlFile({ SERVICE_COMMUNICATION: " Public_URL ", INTERNAL_SERVICE_KEYS: "IdpApi" });
+    expect(json.IdpApi).toBe("https://app.example/api");
+  });
+
+  it("INTERNAL_SERVICE_KEYS narrows internal mode; the other keys stay public", () => {
+    const json = renderUrlFile({ INTERNAL_SERVICE_KEYS: "IdpApi, BiApi,Bogus" });
+    expect(json.IdpApi).toBe("http://id-api/api");
+    expect(json.BiApi).toBe("http://bi-api/bi/api");
+    expect(json.Etl).toBe("https://app.example/etlservice");
+    expect(json.Ums).toBe("https://app.example/ums");
+  });
+
+  it("empty INTERNAL_SERVICE_KEYS does not limit the default", () => {
+    expect(internalKeysFor({ INTERNAL_SERVICE_KEYS: "  " })).toHaveLength(ALL_KEYS.length);
+    expect(internalKeysFor({})).toEqual(ALL_KEYS);
+    expect(internalKeysFor({ SERVICE_COMMUNICATION: "public_url" })).toEqual([]);
+  });
+
+  it("buildServiceUrls matches the rendered file", () => {
+    expect(buildServiceUrls("https://app.example/", internalKeysFor({}))).toEqual(renderUrlFile({}));
+    expect(buildServiceUrls("https://app.example/", [])).toEqual(renderUrlFile({ SERVICE_COMMUNICATION: "public_url" }));
   });
 
   it("forwards intercepted internal calls to the target container with public host headers", async () => {
@@ -206,14 +273,6 @@ describe("multi routing tests", () => {
     const ok = await call(withToken, "s3cret");
     expect(await ok.json()).toEqual({ results: { "id-api": "restarted" } });
     expect(restartContainer).toHaveBeenCalledTimes(1);
-  });
-
-  it("selects internal keys from SERVICE_COMMUNICATION / INTERNAL_SERVICE_KEYS", () => {
-    expect(internalKeysFor({})).toEqual(["IdpApi", "BiApi", "BiJob"]);
-    expect(internalKeysFor({ SERVICE_COMMUNICATION: "internal" })).toEqual(["IdpApi", "BiApi", "BiJob"]);
-    expect(internalKeysFor({ SERVICE_COMMUNICATION: "public_url" })).toEqual([]);
-    expect(internalKeysFor({ SERVICE_COMMUNICATION: " Public_URL " , INTERNAL_SERVICE_KEYS: "IdpApi"})).toEqual([]);
-    expect(internalKeysFor({ INTERNAL_SERVICE_KEYS: "IdpApi, Bogus" })).toEqual(["IdpApi"]);
   });
 
   it("caches successful health checks briefly", async () => {
