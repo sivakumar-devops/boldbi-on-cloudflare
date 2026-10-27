@@ -16,7 +16,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -291,5 +291,44 @@ describe("multi routing tests", () => {
     expect(connect).toHaveBeenCalledTimes(1);
     expect(connect).toHaveBeenCalledWith("ping:80");
     expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("performance diagnostics", () => {
+  it("percentile uses nearest-rank", () => {
+    const v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    expect(percentile(v, 50)).toBe(5);
+    expect(percentile(v, 95)).toBe(10);
+    expect(percentile([], 50)).toBeNull();
+  });
+
+  it("forwardInternal adds no timing and records nothing unless DIAG_ENABLED=true", async () => {
+    const { env } = setup();
+    const res = await forwardInternal(new Request("http://id-api/api/x"), env);
+    expect(res.headers.get("Server-Timing")).toBeNull();
+    expect(internalStatsReport()["id-api"]).toBeUndefined();
+  });
+
+  it("forwardInternal records stats and Server-Timing when DIAG_ENABLED=true", async () => {
+    const { env } = setup();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const res = await forwardInternal(new Request("http://bi-api/bi/api/x"), { ...env, DIAG_ENABLED: "true" });
+    expect(res.headers.get("Server-Timing")).toContain("internal-forward");
+    expect(internalStatsReport()["bi-api"].total.n).toBe(1);
+    expect(JSON.parse(log.mock.calls[0][0] as string)).toMatchObject({ diag: "internal", host: "bi-api", status: 200 });
+    log.mockRestore();
+  });
+
+  it("diag endpoints require the admin token and validate input", async () => {
+    const { env } = setup();
+    const call = (path: string, token?: string) =>
+      worker.fetch(new Request("https://app.example" + path, { headers: token ? { "X-Admin-Token": token } : {} }), { ...env, ADMIN_TOKEN: "secret" });
+    expect((await call("/_internal/diag/stats")).status).toBe(403);
+    expect((await call("/_internal/diag/stats", "wrong")).status).toBe(403);
+    expect((await call("/_internal/diag/stats", "secret")).status).toBe(200);
+    expect((await call("/_internal/diag/curl?from=bad", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/curl?from=id-web&to=id-api&path=/a;rm", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/tcp?from=id-web&host=a;b&port=5432", "secret")).status).toBe(400);
+    expect((await worker.fetch(new Request("https://app.example/_internal/diag/stats"), env)).status).toBe(403);
   });
 });

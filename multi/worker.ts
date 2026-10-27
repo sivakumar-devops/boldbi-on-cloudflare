@@ -19,7 +19,8 @@ export interface MultiEnv {
   SERVICE_COMMUNICATION?: string; // "internal" (default) | "public_url"
   INTERNAL_SERVICE_KEYS?: string; // optional: limit internal mode to these keys (troubleshooting)
   APP_BASE_URL?: string;
-  ADMIN_TOKEN?: string; // enables POST /_internal/restart
+  ADMIN_TOKEN?: string; // enables POST /_internal/restart and /_internal/diag/*
+  DIAG_ENABLED?: string; // "true" records timing for internal calls (Server-Timing header + structured console.log)
 
   // Shared file storage (AWS S3, vendor "storage type 3")
   BOLD_SERVICES_AMAZON_BUCKET_NAME?: string;
@@ -214,6 +215,18 @@ abstract class BoldServiceContainer extends BoldContainer {
     }
   }
 
+  // DIAGNOSTIC (admin only): run a script inside this container and return stdout/ms. Inputs are validated by callers.
+  async diagExec(script: string): Promise<{ ok: boolean; out: string; err?: string }> {
+    if (!this.ctx.container?.running) return { ok: false, out: "", err: "container is not running (not started yet)" };
+    try {
+      const proc = await this.ctx.container.exec(["bash", "-c", script]);
+      const r = await proc.output();
+      return { ok: true, out: new TextDecoder().decode(r.stdout).trim(), err: new TextDecoder().decode(r.stderr).slice(0, 300) || undefined };
+    } catch (e) {
+      return { ok: false, out: "", err: String(e) };
+    }
+  }
+
   // Stops the container so the next request starts a fresh one (re-writes local_service_url.json, re-reads env).
   async restartContainer(): Promise<boolean> {
     if (!this.ctx.container?.running) return false;
@@ -266,7 +279,46 @@ function internalTarget(env: MultiEnv, host: string): { fetch(r: Request): Promi
   return undefined;
 }
 
+// Samples kept per isolate (best effort: the outbound handler may run in a different isolate than the public
+// fetch handler, so the structured console.log lines are the authoritative source for percentiles).
+const internalStats = new Map<string, { totals: number[]; apps: number[]; errors: number }>();
+const MAX_SAMPLES = 2000;
+
+export function recordInternal(host: string, totalMs: number, appMs: number | undefined, error: boolean): void {
+  const s = internalStats.get(host) ?? { totals: [], apps: [], errors: 0 };
+  s.totals.push(totalMs);
+  if (appMs !== undefined) s.apps.push(appMs);
+  if (error) s.errors++;
+  if (s.totals.length > MAX_SAMPLES) s.totals.shift();
+  if (s.apps.length > MAX_SAMPLES) s.apps.shift();
+  internalStats.set(host, s);
+}
+
+export function percentile(sorted: number[], p: number): number | null {
+  if (!sorted.length) return null;
+  return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
+}
+
+function summarize(values: number[]) {
+  const v = [...values].sort((a, b) => a - b);
+  const avg = v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  return { n: v.length, avg: avg === null ? null : Math.round(avg), p50: percentile(v, 50), p95: percentile(v, 95), p99: percentile(v, 99) };
+}
+
+export function internalStatsReport() {
+  return Object.fromEntries(
+    [...internalStats].map(([host, s]) => [host, { total: summarize(s.totals), app: summarize(s.apps), errors: s.errors }]),
+  );
+}
+
+function appDuration(serverTiming: string | null): number | undefined {
+  const m = /container-app;dur=([\d.]+)/.exec(serverTiming ?? "");
+  return m ? Number(m[1]) : undefined;
+}
+
 export async function forwardInternal(request: Request, env: MultiEnv): Promise<Response> {
+  const diag = env.DIAG_ENABLED === "true";
+  const t0 = Date.now();
   const url = new URL(request.url);
   const target = internalTarget(env, url.hostname);
   if (!target) return new Response(`Unknown internal service ${url.hostname}`, { status: 502 });
@@ -275,7 +327,33 @@ export async function forwardInternal(request: Request, env: MultiEnv): Promise<
   const headers = new Headers(request.headers);
   headers.set("X-Forwarded-Proto", base.protocol.slice(0, -1));
   headers.set("X-Forwarded-Host", base.host);
-  return target.fetch(new Request(request, { headers }));
+  if (!diag) return target.fetch(new Request(request, { headers }));
+
+  // Diagnostics only. Stages observable here: stub resolution, and the target fetch (DO RPC + container start + app).
+  const tStub = Date.now();
+  let response: Response;
+  try {
+    response = await target.fetch(new Request(request, { headers }));
+  } catch (e) {
+    recordInternal(url.hostname, Date.now() - t0, undefined, true);
+    console.log(JSON.stringify({ diag: "internal", host: url.hostname, method: request.method, path: url.pathname, error: String(e), totalMs: Date.now() - t0 }));
+    throw e;
+  }
+  const tDone = Date.now();
+  const timing = response.headers.get("Server-Timing");
+  const appMs = appDuration(timing);
+  const totalMs = tDone - t0;
+  recordInternal(url.hostname, totalMs, appMs, response.status >= 500);
+  console.log(JSON.stringify({
+    diag: "internal", host: url.hostname, method: request.method, path: url.pathname, status: response.status,
+    totalMs, prepMs: tStub - t0, targetFetchMs: tDone - tStub, appMs,
+    // targetFetchMs - appMs = DO RPC + container.fetch overhead (+ container start when cold)
+    overheadMs: appMs === undefined ? undefined : tDone - tStub - appMs,
+  }));
+  if (response.status === 101) return response;
+  const out = new Response(response.body, response);
+  out.headers.append("Server-Timing", `internal-forward;dur=${totalMs}`);
+  return out;
 }
 
 export class IdWebContainer extends BoldServiceContainer {}
@@ -297,6 +375,94 @@ for (const cls of [IdWebContainer, IdApiContainer, IdUmsContainer, BiWebContaine
   cls.outboundByHost = Object.fromEntries(
     OUTBOUND_HOSTS.map((h) => [h, (req: Request, env: unknown) => forwardInternal(req, env as MultiEnv)]),
   );
+}
+
+type DiagContainer = { diagExec(script: string): Promise<{ ok: boolean; out: string; err?: string }> };
+const SAFE_HOST = /^[A-Za-z0-9.-]{1,253}$/;
+const SAFE_PATH = /^\/[A-Za-z0-9._~\/-]{0,200}$/;
+
+function clampInt(v: string | null, def: number, min: number, max: number): number {
+  const n = Number.parseInt(v ?? "", 10);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
+}
+
+// /_internal/diag/stats                       per-host internal forward stats (this isolate only)
+// /_internal/diag/trace?host=all|id-web,...   container egress colo via cdn-cgi/trace (approximates container location)
+// /_internal/diag/curl?from=bi-web&to=bi-api&path=/bi/api/health-check&n=20   timing breakdown per request, run inside "from"
+// /_internal/diag/tcp?from=bi-api&host=<db-or-s3-host>&port=5432&n=10         TCP connect time from inside the container
+// /_internal/diag/resources?host=all          load average, memory, CPU count, uptime inside each container
+async function handleDiag(path: string, url: URL, env: MultiEnv): Promise<Response> {
+  const hostsParam = url.searchParams.get("host") ?? "all";
+  const hosts = hostsParam === "all" ? OUTBOUND_HOSTS : hostsParam.split(",").filter((h) => OUTBOUND_HOSTS.includes(h));
+  const exec = (h: string, script: string) => (internalTarget(env, h) as unknown as DiagContainer).diagExec(script);
+
+  if (path === "/_internal/diag/stats") return Response.json({ note: "samples are per isolate; use DIAG_ENABLED logs for full percentiles", hosts: internalStatsReport() });
+
+  if (path === "/_internal/diag/trace") {
+    const out: Record<string, unknown> = {};
+    for (const h of hosts) {
+      const r = await exec(h, "curl -s -m 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(colo|loc|ip|http)=' | tr '\\n' ' '");
+      out[h] = r.ok ? r.out : r.err;
+    }
+    return Response.json({ worker: { colo: (url as unknown as { cf?: { colo?: string } }).cf?.colo ?? null }, containers: out });
+  }
+
+  if (path === "/_internal/diag/resources") {
+    const out: Record<string, unknown> = {};
+    for (const h of hosts) {
+      const r = await exec(h, "echo \"cpus=$(nproc) load=$(cut -d' ' -f1-3 /proc/loadavg) $(grep -E 'MemTotal|MemAvailable' /proc/meminfo | tr -s ' ' | tr '\\n' ' ') uptime_s=$(cut -d. -f1 /proc/uptime)\"; cat /sys/fs/cgroup/cpu.stat 2>/dev/null | grep -E 'throttled|nr_periods' | tr '\\n' ' '");
+      out[h] = r.ok ? r.out : r.err;
+    }
+    return Response.json(out);
+  }
+
+  const from = url.searchParams.get("from") ?? "";
+  if (!OUTBOUND_HOSTS.includes(from)) return Response.json({ error: "from must be one of " + OUTBOUND_HOSTS.join(",") }, { status: 400 });
+  const n = clampInt(url.searchParams.get("n"), 10, 1, 100);
+
+  if (path === "/_internal/diag/curl") {
+    const to = url.searchParams.get("to") ?? "";
+    const p = url.searchParams.get("path") ?? "/";
+    const target = url.searchParams.get("target"); // optional absolute public URL host (for public_url comparison)
+    if (!SAFE_PATH.test(p)) return Response.json({ error: "bad path" }, { status: 400 });
+    let base: string;
+    if (target) {
+      if (!SAFE_HOST.test(target)) return Response.json({ error: "bad target" }, { status: 400 });
+      base = `https://${target}`;
+    } else {
+      if (!OUTBOUND_HOSTS.includes(to)) return Response.json({ error: "to must be an internal host or pass target=<public host>" }, { status: 400 });
+      base = `http://${to}`;
+    }
+    // One curl per iteration (new connection each time, matching a fresh outbound call). Fields: code, dns, connect, ttfb, total (ms).
+    const script = `for i in $(seq 1 ${n}); do curl -s -o /dev/null -m 60 -w '%{http_code} %{time_namelookup} %{time_connect} %{time_starttransfer} %{time_total}\\n' "${base}${p}" || echo "000 0 0 0 0"; done`;
+    const r = await exec(from, script);
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    const rows = r.out.split("\n").map((l) => l.trim().split(" ")).filter((c) => c.length === 5);
+    const col = (i: number) => rows.map((c) => Math.round(Number(c[i]) * 1000));
+    const errors = rows.filter((c) => !/^[23]/.test(c[0])).length;
+    return Response.json({
+      from, url: `${base}${p}`, n: rows.length, errors, errorRate: rows.length ? errors / rows.length : null,
+      ms: { dns: summarize(col(1)), connect: summarize(col(2)), ttfb: summarize(col(3)), total: summarize(col(4)) },
+      note: "first sample may include cold start; discard it or warm up first",
+    });
+  }
+
+  if (path === "/_internal/diag/tcp") {
+    const host = url.searchParams.get("host") ?? "";
+    const port = clampInt(url.searchParams.get("port"), 0, 1, 65535);
+    if (!SAFE_HOST.test(host) || !port) return Response.json({ error: "host and port required" }, { status: 400 });
+    const script = `for i in $(seq 1 ${n}); do s=$(date +%s%N); (exec 3<>/dev/tcp/${host}/${port}) 2>/dev/null && r=ok || r=fail; e=$(date +%s%N); echo "$r $(( (e - s) / 1000000 ))"; done`;
+    const r = await exec(from, script);
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    const rows = r.out.split("\n").map((l) => l.trim().split(" "));
+    return Response.json({
+      from, host, port, errors: rows.filter((c) => c[0] !== "ok").length,
+      connectMs: summarize(rows.filter((c) => c[0] === "ok").map((c) => Number(c[1]))),
+      note: "TCP connect only (includes DNS). For S3 this is network RTT; HTTPS/API time is measured with /diag/curl target=<bucket host>.",
+    });
+  }
+
+  return new Response("Not found", { status: 404 });
 }
 
 const HEALTH_PATHS = new Set(["/health-check", "/api/health-check", "/ums/health-check"]);
@@ -350,6 +516,12 @@ export default {
       const results = [];
       for (const h of targets) results.push(await caller.pingInternal(h));
       return Response.json({ from, results });
+    }
+
+    // DIAGNOSTICS (admin only, read-only). See multi/DIAGNOSTICS.md.
+    if (path.startsWith("/_internal/diag/")) {
+      if (!env.ADMIN_TOKEN || request.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) return new Response("Forbidden", { status: 403 });
+      return handleDiag(path, publicUrl, env);
     }
 
     const cacheable = request.method === "GET" && HEALTH_PATHS.has(path);
