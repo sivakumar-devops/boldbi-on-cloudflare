@@ -183,6 +183,16 @@ describe("multi routing tests", () => {
     expect(hosts.sort()).toEqual([...OUTBOUND_HOSTS].sort());
   });
 
+  it("ping-internal asks the caller container to ping each target", async () => {
+    const { env } = setup();
+    const pingInternal = vi.fn(async (host: string) => ({ host, ok: true, status: "200", ms: 5 }));
+    (env.ID_UMS_CONTAINER as unknown as { getByName: unknown }).getByName = vi.fn(() => ({ pingInternal }));
+    const res = await worker.fetch(new Request("https://app.example/_internal/ping-internal?from=id-ums&to=id-api,bogus,bi-jobs"), env);
+    const json = (await res.json()) as { from: string; results: { host: string }[] };
+    expect(json.from).toBe("id-ums");
+    expect(json.results.map((r) => r.host)).toEqual(["id-api", "bi-jobs"]);
+  });
+
   it("caches successful health checks briefly", async () => {
     const { fetch, idApiFetch } = setup();
     await fetch("/api/health-check");

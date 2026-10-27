@@ -104,3 +104,13 @@ To fall back to the old behaviour (all calls via the public URL): `npx wrangler 
 then restart the containers (`npm run deploy`, or stop them) because the URL file is written at container start.
 
 Timing: every proxied response carries a `Server-Timing` header (`container-start`, `container-app`, `worker-total`).
+
+## Temporary diagnostic: `/_internal/ping-internal`
+
+Runs a request *inside* a running container against the internal hostnames (through the outbound interception) and returns status and time:
+
+```powershell
+Invoke-RestMethod "$b/_internal/ping-internal?from=id-ums&to=id-api,bi-api,bi-jobs" | ConvertTo-Json -Depth 5
+```
+
+`from` must be a running service (wake it first, e.g. `/ums/health-check`). Remove this route and `pingInternal` once verified.

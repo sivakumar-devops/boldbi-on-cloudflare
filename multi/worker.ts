@@ -133,11 +133,40 @@ export function buildServiceEntrypoint(internal: boolean): string[] {
   ];
 }
 
+// TEMPORARY diagnostic: health-check paths per internal host, used by /_internal/ping-internal.
+const INTERNAL_HEALTH_PATHS: Record<string, string> = {
+  "id-web": "/health-check", "id-api": "/api/health-check", "id-ums": "/ums/health-check",
+  "bi-web": "/bi/health-check", "bi-api": "/bi/api/health-check", "bi-jobs": "/bi/jobs/health-check",
+  "bi-designer": "/bi/designer/health-check", "bi-etl": "/health-check", "bold-ai": "/health-check", "bold-mcp": "/health-check",
+};
+
 abstract class BoldServiceContainer extends BoldContainer {
   defaultPort = 80;
   protected servicePort = 80;
   sleepAfter = "6h";
   enableInternet = true;
+
+  // TEMPORARY diagnostic: runs inside this container and calls http://<host><health path> so the call goes
+  // through the outbound interception. Uses curl when present, otherwise bash /dev/tcp.
+  async pingInternal(host: string): Promise<{ host: string; ok: boolean; status?: string; ms?: number; error?: string }> {
+    const path = INTERNAL_HEALTH_PATHS[host];
+    if (!path) return { host, ok: false, error: "unknown host" };
+    if (!this.ctx.container?.running) return { host, ok: false, error: "caller container is not running" };
+    const script =
+      `url="http://${host}${path}"; s=$(date +%s%N); ` +
+      `if command -v curl >/dev/null 2>&1; then code=$(curl -s -o /dev/null -m 60 -w '%{http_code}' "$url") || code=curl-failed; ` +
+      `else exec 3<>/dev/tcp/${host}/80 && printf 'GET ${path} HTTP/1.0\\r\\nHost: ${host}\\r\\n\\r\\n' >&3 && read -r -t 60 line <&3 && code=$(echo "$line" | cut -d' ' -f2) || code=tcp-failed; fi; ` +
+      `e=$(date +%s%N); echo "$code $(( (e - s) / 1000000 ))"`;
+    try {
+      const proc = await this.ctx.container.exec(["bash", "-c", script]);
+      const out = await proc.output();
+      const [status, ms] = new TextDecoder().decode(out.stdout).trim().split(" ");
+      const ok = /^[23]\d\d$/.test(status ?? "");
+      return { host, ok, status, ms: Number(ms), error: ok ? undefined : new TextDecoder().decode(out.stderr).slice(0, 200) || undefined };
+    } catch (e) {
+      return { host, ok: false, error: String(e) };
+    }
+  }
 
   override async fetch(request: Request): Promise<Response> {
     let startMs = 0;
@@ -235,6 +264,18 @@ export default {
         mode: "multi-container-spike",
         services: ["id-web", "id-api", "id-ums", "bi-web", "bi-api", "bi-jobs", "bi-designer", "bi-etl", "bold-ai", "bold-mcp"],
       });
+    }
+
+    // TEMPORARY diagnostic: /_internal/ping-internal?from=id-ums&to=id-api,bi-api,bi-jobs
+    // Makes the running "from" container call each "to" host over its internal URL and reports status and time.
+    if (path === "/_internal/ping-internal") {
+      const from = publicUrl.searchParams.get("from") ?? "id-ums";
+      const targets = (publicUrl.searchParams.get("to") ?? "id-api,bi-api,bi-jobs").split(",").filter((h) => h in INTERNAL_HEALTH_PATHS);
+      const caller = internalTarget(env, from) as unknown as { pingInternal?(h: string): Promise<unknown> } | undefined;
+      if (!caller?.pingInternal) return Response.json({ error: `unknown from host ${from}` }, { status: 400 });
+      const results = [];
+      for (const h of targets) results.push(await caller.pingInternal(h));
+      return Response.json({ from, results });
     }
 
     const cacheable = request.method === "GET" && HEALTH_PATHS.has(path);
