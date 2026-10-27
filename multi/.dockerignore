@@ -1,7 +1,0 @@
-node_modules
-.wrangler
-*.log
-.dev.vars*
-.env*
-README.md
-**/*_test.go

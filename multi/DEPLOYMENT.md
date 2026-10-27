@@ -31,7 +31,7 @@ The Worker handles path-based routing matching Syncfusion's Nginx configuration:
 
 ## 1. Prerequisites
 
-- Node.js 22+ and Rancher Desktop (with **dockerd / moby** engine enabled)
+- Node.js 22+ (no local Docker build is needed; `wrangler deploy` references the public vendor images on Docker Hub)
 - Cloudflare CLI logged in via `npx wrangler login` or `CLOUDFLARE_API_TOKEN`
 
 ```powershell
@@ -43,7 +43,7 @@ Set your `account_id` in `multi/wrangler.jsonc` (run `npx wrangler whoami` to fi
 
 ## 2. Deploy
 
-Builds and deploys the 3 initial identity services:
+Deploys the Worker and the Bold BI service containers (vendor images, `syncfusion/*:17.1.30`):
 
 ```powershell
 npm run deploy
@@ -71,7 +71,7 @@ Expect:
 {
   "ok": true,
   "mode": "multi-container-spike",
-  "services": ["id-web", "id-api", "id-ums"]
+  "services": ["id-web", "id-api", "id-ums", "..."]
 }
 ```
 
@@ -87,6 +87,10 @@ Services share no disk on Cloudflare, so the vendor's S3 mode is used (`BOLD_SER
 |---|---|
 | `BOLD_SERVICES_AMAZON_BUCKET_NAME`, `BOLD_SERVICES_AMAZON_ROOTFOLDER_NAME`, `BOLD_SERVICES_AWS_REGION` | S3 location |
 | `BOLD_SERVICES_AWS_ACCESS_KEY_ID`, `BOLD_SERVICES_AWS_SECRET_ACCESS_KEY` | S3 credentials |
-| `BOLD_SERVICES_DB_HOST`, `BOLD_SERVICES_DB_PORT`, `BOLD_SERVICES_DB_NAME`, `BOLD_SERVICES_DB_USER`, `BOLD_SERVICES_DB_PASSWORD` | PostgreSQL (passed to id-ums only, as in the vendor manifests) |
+
+Database settings are not stored as secrets: enter them manually on the UMS startup page (`/ums/startup`).
+
+How service URLs work: each container is started with an entrypoint override (`SERVICE_ENTRYPOINT` in `worker.ts`) that writes
+`local_service_url.json` with the public URLs before running the vendor `entrypoint.sh`. This replaces the former custom Dockerfiles.
 
 Not yet done: direct service-to-service URLs (`BI_*_SERVICE_URL`, `ID_*_SERVICE_URL`); services still call each other through the public URL.

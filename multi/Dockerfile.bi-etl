@@ -1,5 +1,0 @@
-FROM syncfusion/bold-etl:17.1.30
-EXPOSE 80
-COPY service-urls-entrypoint.sh /usr/local/bin/service-urls-entrypoint.sh
-RUN sed -i "s/\r$//" /usr/local/bin/service-urls-entrypoint.sh
-ENTRYPOINT ["bash", "/usr/local/bin/service-urls-entrypoint.sh"]

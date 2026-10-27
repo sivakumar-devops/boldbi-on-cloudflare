@@ -15,11 +15,6 @@ export interface MultiEnv {
   // Optional overrides / secrets
   SERVICE_COMMUNICATION?: string; // "public_url" (default)
   APP_BASE_URL?: string;
-  BOLD_SERVICES_DB_HOST?: string;
-  BOLD_SERVICES_DB_PORT?: string;
-  BOLD_SERVICES_DB_NAME?: string;
-  BOLD_SERVICES_DB_USER?: string;
-  BOLD_SERVICES_DB_PASSWORD?: string;
 
   // Shared file storage (AWS S3, vendor "storage type 3")
   BOLD_SERVICES_AMAZON_BUCKET_NAME?: string;
@@ -37,11 +32,8 @@ const S3_KEYS = [
   "BOLD_SERVICES_AWS_SECRET_ACCESS_KEY",
 ] as const;
 
-const DB_KEYS = ["BOLD_SERVICES_DB_HOST", "BOLD_SERVICES_DB_PORT", "BOLD_SERVICES_DB_NAME", "BOLD_SERVICES_DB_PASSWORD"] as const;
-
-// Mirrors the vendor's S3 multi-container manifests: every service gets the S3 settings,
-// and only UMS (which sets up the database) gets the database settings.
-export function buildContainerEnv(requestUrl: string, env: MultiEnv, withDatabase: boolean): Record<string, string> {
+// Every service gets the S3 settings. Database settings are entered manually on the UMS startup page.
+export function buildContainerEnv(requestUrl: string, env: MultiEnv): Record<string, string> {
   const url = new URL(requestUrl);
   const vars: Record<string, string> = {
     APP_BASE_URL: env.APP_BASE_URL || `${url.protocol}//${url.host}`,
@@ -56,13 +48,6 @@ export function buildContainerEnv(requestUrl: string, env: MultiEnv, withDatabas
   if (env.BOLD_SERVICES_AMAZON_BUCKET_NAME) {
     vars.BOLD_SERVICES_STORAGETYPE = "3";
     for (const k of S3_KEYS) if (env[k]) vars[k] = env[k]!;
-  }
-
-  if (withDatabase && env.BOLD_SERVICES_DB_HOST) {
-    vars.BOLD_SERVICES_DB_TYPE = "postgresql";
-    vars.BOLD_SERVICES_POSTGRESQL_MAINTENANCE_DB = "postgres";
-    vars.BOLD_SERVICES_DB_USER = env.BOLD_SERVICES_DB_USER || "postgres";
-    for (const k of DB_KEYS) if (env[k]) vars[k] = env[k]!;
   }
 
   return vars;
@@ -115,18 +100,38 @@ class BoldContainer extends Container<MultiEnv> {
   }
 }
 
+// The vendor entrypoint writes local_service_url.json with Docker hostnames (http://id-api/api, ...),
+// which do not resolve on Cloudflare. Write it first with the public URLs (the Worker routes them);
+// the vendor script leaves the file alone when it already has the Mcp/ReportsAi/ReportsMcp nodes.
+const SERVICE_URL_PATHS: Record<string, string> = {
+  Idp: "", IdpApi: "/api", Ums: "/ums", Bi: "/bi", BiApi: "/bi/api", BiJob: "/bi/jobs",
+  BiDesigner: "/bi/designer", BiDesignerHelper: "/bi/designer/helper", Etl: "/etlservice",
+  EtlBlazor: "/etlservice/framework/blazor.server.js", Ai: "/aiservice", Mcp: "/mcp",
+  Reports: "/reporting", ReportsApi: "/reporting/api", ReportsJob: "/reporting/jobs",
+  ReportsService: "/reporting/reportservice", ReportsViewer: "/reporting/viewer",
+  ReportsAi: "/reportsai", ReportsMcp: "/reportsmcp",
+};
+const SERVICE_URLS_JSON = `{${Object.entries(SERVICE_URL_PATHS)
+  .map(([k, p]) => `"${k}":"$base${p}"`)
+  .join(",")}}`;
+export const SERVICE_ENTRYPOINT = [
+  "bash",
+  "-c",
+  `set -eu; base="\${APP_BASE_URL%/}"; dir=/application/app_data/configuration; mkdir -p "$dir"; chmod 777 "$dir"; ` +
+    `printf '%s' "${SERVICE_URLS_JSON.replace(/"/g, '\\"')}" > "$dir/local_service_url.json"; exec bash entrypoint.sh`,
+];
+
 abstract class BoldServiceContainer extends BoldContainer {
   defaultPort = 80;
   protected servicePort = 80;
   sleepAfter = "6h";
   enableInternet = true;
-  protected withDatabase = false;
 
   override async fetch(request: Request): Promise<Response> {
     if (!this.ctx.container?.running) {
       await this.startAndWaitForPorts({
         ports: this.servicePort,
-        startOptions: { envVars: buildContainerEnv(request.url, this.env, this.withDatabase) },
+        startOptions: { envVars: buildContainerEnv(request.url, this.env), entrypoint: SERVICE_ENTRYPOINT },
         cancellationOptions: { portReadyTimeoutMS: 180_000 },
       });
     }
@@ -136,9 +141,7 @@ abstract class BoldServiceContainer extends BoldContainer {
 
 export class IdWebContainer extends BoldServiceContainer {}
 export class IdApiContainer extends BoldServiceContainer {}
-export class IdUmsContainer extends BoldServiceContainer {
-  protected override withDatabase = true;
-}
+export class IdUmsContainer extends BoldServiceContainer {}
 export class BiWebContainer extends BoldServiceContainer {}
 export class BiApiContainer extends BoldServiceContainer {}
 export class BiJobsContainer extends BoldServiceContainer {}

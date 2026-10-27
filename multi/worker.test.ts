@@ -11,7 +11,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, SERVICE_ENTRYPOINT } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -133,16 +133,14 @@ describe("multi routing tests", () => {
     expect(s.biDesignerFetch).toHaveBeenCalledTimes(2);
   });
 
-  it("builds container env: S3 for all services, database only for UMS", () => {
+  it("builds container env with S3 settings and no database settings", () => {
     const env = {
       BOLD_SERVICES_AMAZON_BUCKET_NAME: "bkt",
       BOLD_SERVICES_AWS_REGION: "us-east-1",
       BOLD_SERVICES_AWS_ACCESS_KEY_ID: "id",
       BOLD_SERVICES_AWS_SECRET_ACCESS_KEY: "secret",
-      BOLD_SERVICES_DB_HOST: "db.example",
-      BOLD_SERVICES_DB_PASSWORD: "pw",
     } as MultiEnv;
-    const bi = buildContainerEnv("https://app.example/bi", env, false);
+    const bi = buildContainerEnv("https://app.example/bi", env);
     expect(bi).toMatchObject({
       APP_BASE_URL: "https://app.example",
       BOLD_SERVICES_STORAGETYPE: "3",
@@ -150,9 +148,14 @@ describe("multi routing tests", () => {
       BOLD_SERVICES_AWS_SECRET_ACCESS_KEY: "secret",
     });
     expect(bi).not.toHaveProperty("BOLD_SERVICES_DB_HOST");
-    const ums = buildContainerEnv("https://app.example/ums", env, true);
-    expect(ums).toMatchObject({ BOLD_SERVICES_DB_TYPE: "postgresql", BOLD_SERVICES_DB_HOST: "db.example", BOLD_SERVICES_DB_PASSWORD: "pw" });
-    expect(buildContainerEnv("https://a/", {} as MultiEnv, false)).not.toHaveProperty("BOLD_SERVICES_STORAGETYPE");
+    expect(buildContainerEnv("https://a/", {} as MultiEnv)).not.toHaveProperty("BOLD_SERVICES_STORAGETYPE");
+  });
+
+  it("entrypoint writes public service URLs then runs the vendor entrypoint", () => {
+    const script = SERVICE_ENTRYPOINT[2];
+    expect(script).toContain('base="${APP_BASE_URL%/}"');
+    expect(script).toContain('\\"BiApi\\":\\"$base/bi/api\\"');
+    expect(script).toContain("exec bash entrypoint.sh");
   });
 
   it("caches successful health checks briefly", async () => {

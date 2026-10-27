@@ -11,71 +11,61 @@
   "containers": [
     {
       "class_name": "IdWebContainer",
-      "image": "./Dockerfile.id-web",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/bold-identity:17.1.30",
       "instance_type": "standard-2",
       "max_instances": 1
     },
     {
       "class_name": "IdApiContainer",
-      "image": "./Dockerfile.id-api",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/bold-identity-api:17.1.30",
       "instance_type": "standard-1",
       "max_instances": 1
     },
     {
       "class_name": "IdUmsContainer",
-      "image": "./Dockerfile.id-ums",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/bold-ums:17.1.30",
       "instance_type": "standard-2",
       "max_instances": 1
     },
     {
       "class_name": "BiWebContainer",
-      "image": "./Dockerfile.bi-web",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/boldbi-server:17.1.30",
       "instance_type": "standard-2",
       "max_instances": 1
     },
     {
       "class_name": "BiApiContainer",
-      "image": "./Dockerfile.bi-api",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/boldbi-server-api:17.1.30",
       "instance_type": "standard-1",
       "max_instances": 1
     },
     {
       "class_name": "BiJobsContainer",
-      "image": "./Dockerfile.bi-jobs",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/boldbi-server-jobs:17.1.30",
       "instance_type": "standard-1",
       "max_instances": 1
     },
     {
       "class_name": "BiDesignerContainer",
-      "image": "./Dockerfile.bi-designer",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/boldbi-designer:17.1.30",
       "instance_type": "standard-2",
       "max_instances": 1
     },
     {
       "class_name": "BiEtlContainer",
-      "image": "./Dockerfile.bi-etl",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/bold-etl:17.1.30",
       "instance_type": "standard-2",
       "max_instances": 1
     },
     {
       "class_name": "BoldAiContainer",
-      "image": "./Dockerfile.bold-ai",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/bold-ai:17.1.30",
       "instance_type": "standard-1",
       "max_instances": 1
     },
     {
       "class_name": "BoldMcpContainer",
-      "image": "./Dockerfile.bold-mcp",
-      "image_build_context": ".",
+      "image": "docker.io/syncfusion/boldbi-mcp-server:17.1.30",
       "instance_type": "standard-1",
       "max_instances": 1
     }
