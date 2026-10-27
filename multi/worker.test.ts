@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@cloudflare/containers", () => ({
+  ContainerProxy: class {},
   Container: class {
     ctx: unknown;
     env: unknown;

@@ -1,5 +1,8 @@
 import { Container } from "@cloudflare/containers";
 
+// Required for outbound interception (outboundByHost): the platform routes intercepted calls through it.
+export { ContainerProxy } from "@cloudflare/containers";
+
 export interface MultiEnv {
   ID_WEB_CONTAINER: DurableObjectNamespace<IdWebContainer>;
   ID_API_CONTAINER: DurableObjectNamespace<IdApiContainer>;
