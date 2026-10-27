@@ -15,6 +15,7 @@ export interface MultiEnv {
   // Optional overrides / secrets
   SERVICE_COMMUNICATION?: string; // "public_url" = every service call goes via the public URL; default = internal routing
   APP_BASE_URL?: string;
+  ADMIN_TOKEN?: string; // enables POST /_internal/restart
 
   // Shared file storage (AWS S3, vendor "storage type 3")
   BOLD_SERVICES_AMAZON_BUCKET_NAME?: string;
@@ -168,6 +169,13 @@ abstract class BoldServiceContainer extends BoldContainer {
     }
   }
 
+  // Stops the container so the next request starts a fresh one (re-writes local_service_url.json, re-reads env).
+  async restartContainer(): Promise<boolean> {
+    if (!this.ctx.container?.running) return false;
+    await this.destroy();
+    return true;
+  }
+
   override async fetch(request: Request): Promise<Response> {
     let startMs = 0;
     if (!this.ctx.container?.running) {
@@ -264,6 +272,27 @@ export default {
         mode: "multi-container-spike",
         services: ["id-web", "id-api", "id-ums", "bi-web", "bi-api", "bi-jobs", "bi-designer", "bi-etl", "bold-ai", "bold-mcp"],
       });
+    }
+
+    // POST /_internal/restart?host=all|id-api,bi-web  (header X-Admin-Token must equal the ADMIN_TOKEN secret).
+    // Needed because `wrangler deploy` does not restart containers when only the Worker code changed.
+    if (path === "/_internal/restart") {
+      if (!env.ADMIN_TOKEN || request.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      if (request.method !== "POST") return new Response("Use POST", { status: 405 });
+      const hostParam = publicUrl.searchParams.get("host") ?? "all";
+      const hosts = hostParam === "all" ? OUTBOUND_HOSTS : hostParam.split(",").filter((h) => OUTBOUND_HOSTS.includes(h));
+      const results: Record<string, string> = {};
+      for (const h of hosts) {
+        try {
+          const c = internalTarget(env, h) as unknown as { restartContainer(): Promise<boolean> };
+          results[h] = (await c.restartContainer()) ? "restarted" : "was not running";
+        } catch (e) {
+          results[h] = `error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+      return Response.json({ results });
     }
 
     // TEMPORARY diagnostic: /_internal/ping-internal?from=id-ums&to=id-api,bi-api,bi-jobs

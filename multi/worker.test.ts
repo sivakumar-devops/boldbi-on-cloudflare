@@ -193,6 +193,20 @@ describe("multi routing tests", () => {
     expect(json.results.map((r) => r.host)).toEqual(["id-api", "bi-jobs"]);
   });
 
+  it("restart requires the admin token and restarts the requested containers", async () => {
+    const { env } = setup();
+    const restartContainer = vi.fn(async () => true);
+    (env.ID_API_CONTAINER as unknown as { getByName: unknown }).getByName = vi.fn(() => ({ restartContainer }));
+    const call = (e: MultiEnv, token?: string) =>
+      worker.fetch(new Request("https://app.example/_internal/restart?host=id-api", { method: "POST", headers: token ? { "X-Admin-Token": token } : {} }), e);
+    expect((await call(env, "x")).status).toBe(403); // secret not configured
+    const withToken = { ...env, ADMIN_TOKEN: "s3cret" } as MultiEnv;
+    expect((await call(withToken, "wrong")).status).toBe(403);
+    const ok = await call(withToken, "s3cret");
+    expect(await ok.json()).toEqual({ results: { "id-api": "restarted" } });
+    expect(restartContainer).toHaveBeenCalledTimes(1);
+  });
+
   it("caches successful health checks briefly", async () => {
     const { fetch, idApiFetch } = setup();
     await fetch("/api/health-check");

@@ -114,3 +114,16 @@ Invoke-RestMethod "$b/_internal/ping-internal?from=id-ums&to=id-api,bi-api,bi-jo
 ```
 
 `from` must be a running service (wake it first, e.g. `/ums/health-check`). Remove this route and `pingInternal` once verified.
+
+## Restarting containers
+
+`wrangler deploy` does **not** restart containers when only Worker code or env logic changed ("No changes to be made"). Because
+`local_service_url.json` is written when a container starts, restart them explicitly:
+
+```powershell
+npx wrangler secret put ADMIN_TOKEN        # once; any long random value
+$h = @{ "X-Admin-Token" = "<the token>" }
+Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=all"            # all services
+Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=id-api,id-ums"  # selected services
+```
+The next request to each service starts a fresh container.
