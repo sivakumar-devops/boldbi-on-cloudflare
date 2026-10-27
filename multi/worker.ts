@@ -391,7 +391,7 @@ function clampInt(v: string | null, def: number, min: number, max: number): numb
 // /_internal/diag/curl?from=bi-web&to=bi-api&path=/bi/api/health-check&n=20   timing breakdown per request, run inside "from"
 // /_internal/diag/tcp?from=bi-api&host=<db-or-s3-host>&port=5432&n=10         TCP connect time from inside the container
 // /_internal/diag/resources?host=all          load average, memory, CPU count, uptime inside each container
-async function handleDiag(path: string, url: URL, env: MultiEnv): Promise<Response> {
+async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string): Promise<Response> {
   const hostsParam = url.searchParams.get("host") ?? "all";
   const hosts = hostsParam === "all" ? OUTBOUND_HOSTS : hostsParam.split(",").filter((h) => OUTBOUND_HOSTS.includes(h));
   const exec = (h: string, script: string) => (internalTarget(env, h) as unknown as DiagContainer).diagExec(script);
@@ -404,7 +404,7 @@ async function handleDiag(path: string, url: URL, env: MultiEnv): Promise<Respon
       const r = await exec(h, "curl -s -m 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(colo|loc|ip|http)=' | tr '\\n' ' '");
       out[h] = r.ok ? r.out : r.err;
     }
-    return Response.json({ worker: { colo: (url as unknown as { cf?: { colo?: string } }).cf?.colo ?? null }, containers: out });
+    return Response.json({ worker: { colo: colo ?? null }, containers: out });
   }
 
   if (path === "/_internal/diag/resources") {
@@ -426,7 +426,14 @@ async function handleDiag(path: string, url: URL, env: MultiEnv): Promise<Respon
     const target = url.searchParams.get("target"); // optional absolute public URL host (for public_url comparison)
     if (!SAFE_PATH.test(p)) return Response.json({ error: "bad path" }, { status: 400 });
     let base: string;
-    if (target) {
+    let extra = "";
+    if (url.searchParams.get("local") === "1") {
+      // App-only time: call the service on loopback inside its own container (no interception, no DO hop).
+      // Forwarded headers mimic the Worker so tenant resolution behaves the same.
+      base = `http://127.0.0.1:${from === "bold-ai" ? 8080 : 80}`;
+      const pub = /^[A-Za-z0-9.:-]{1,260}$/.test(url.host) ? url.host : "localhost";
+      extra = ` -H 'X-Forwarded-Host: ${pub}' -H 'X-Forwarded-Proto: https'`;
+    } else if (target) {
       if (!SAFE_HOST.test(target)) return Response.json({ error: "bad target" }, { status: 400 });
       base = `https://${target}`;
     } else {
@@ -434,7 +441,7 @@ async function handleDiag(path: string, url: URL, env: MultiEnv): Promise<Respon
       base = `http://${to}`;
     }
     // One curl per iteration (new connection each time, matching a fresh outbound call). Fields: code, dns, connect, ttfb, total (ms).
-    const script = `for i in $(seq 1 ${n}); do curl -s -o /dev/null -m 60 -w '%{http_code} %{time_namelookup} %{time_connect} %{time_starttransfer} %{time_total}\\n' "${base}${p}" || echo "000 0 0 0 0"; done`;
+    const script = `for i in $(seq 1 ${n}); do curl -s -o /dev/null -m 60 -w '%{http_code} %{time_namelookup} %{time_connect} %{time_starttransfer} %{time_total}\\n'${extra} "${base}${p}" || echo "000 0 0 0 0"; done`;
     const r = await exec(from, script);
     if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
     const rows = r.out.split("\n").map((l) => l.trim().split(" ")).filter((c) => c.length === 5);
@@ -521,7 +528,7 @@ export default {
     // DIAGNOSTICS (admin only, read-only). See multi/DIAGNOSTICS.md.
     if (path.startsWith("/_internal/diag/")) {
       if (!env.ADMIN_TOKEN || request.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) return new Response("Forbidden", { status: 403 });
-      return handleDiag(path, publicUrl, env);
+      return handleDiag(path, publicUrl, env, (request as Request & { cf?: { colo?: string } }).cf?.colo);
     }
 
     const cacheable = request.method === "GET" && HEALTH_PATHS.has(path);

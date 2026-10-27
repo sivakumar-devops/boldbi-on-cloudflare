@@ -332,3 +332,17 @@ describe("performance diagnostics", () => {
     expect((await worker.fetch(new Request("https://app.example/_internal/diag/stats"), env)).status).toBe(403);
   });
 });
+
+describe("diag curl local mode", () => {
+  it("calls loopback inside the container with forwarded headers, not the internal host", async () => {
+    const { env } = setup();
+    const diagExec = vi.fn(async (_s: string) => ({ ok: true, out: "200 0.001 0.001 0.002 0.003" }));
+    const e = { ...env, ADMIN_TOKEN: "secret", ID_API_CONTAINER: { getByName: vi.fn(() => ({ diagExec })) } as never };
+    const res = await worker.fetch(new Request("https://app.example/_internal/diag/curl?from=id-api&local=1&path=/api/health-check&n=1", { headers: { "X-Admin-Token": "secret" } }), e);
+    expect(res.status).toBe(200);
+    const script = diagExec.mock.calls[0][0];
+    expect(script).toContain("http://127.0.0.1:80/api/health-check");
+    expect(script).toContain("X-Forwarded-Host: app.example");
+    expect(script).not.toContain("http://id-api");
+  });
+});
