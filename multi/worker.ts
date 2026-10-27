@@ -13,7 +13,7 @@ export interface MultiEnv {
   BOLD_MCP_CONTAINER: DurableObjectNamespace<BoldMcpContainer>;
 
   // Optional overrides / secrets
-  SERVICE_COMMUNICATION?: string; // "public_url" (default)
+  SERVICE_COMMUNICATION?: string; // "public_url" = every service call goes via the public URL; default = internal routing
   APP_BASE_URL?: string;
 
   // Shared file storage (AWS S3, vendor "storage type 3")
@@ -111,15 +111,27 @@ const SERVICE_URL_PATHS: Record<string, string> = {
   ReportsService: "/reporting/reportservice", ReportsViewer: "/reporting/viewer",
   ReportsAi: "/reportsai", ReportsMcp: "/reportsmcp",
 };
-const SERVICE_URLS_JSON = `{${Object.entries(SERVICE_URL_PATHS)
-  .map(([k, p]) => `"${k}":"$base${p}"`)
-  .join(",")}}`;
-export const SERVICE_ENTRYPOINT = [
-  "bash",
-  "-c",
-  `set -eu; base="\${APP_BASE_URL%/}"; dir=/application/app_data/configuration; mkdir -p "$dir"; chmod 777 "$dir"; ` +
-    `printf '%s' "${SERVICE_URLS_JSON.replace(/"/g, '\\"')}" > "$dir/local_service_url.json"; exec bash entrypoint.sh`,
-];
+// Server-to-server URLs that are sent to internal hostnames. The container's outbound HTTP for these hosts is
+// intercepted (see OUTBOUND_HOSTS) and delivered straight to the target Durable Object, skipping the public
+// edge (DNS, TLS, Worker, return path). Browser-facing URLs (Idp, Ums, Bi, ...) stay public because the
+// browser follows them. Set SERVICE_COMMUNICATION=public_url to turn this off.
+const INTERNAL_SERVICE_URLS: Record<string, string> = {
+  IdpApi: "http://id-api/api",
+  BiApi: "http://bi-api/bi/api",
+  BiJob: "http://bi-jobs/bi/jobs",
+};
+
+export function buildServiceEntrypoint(internal: boolean): string[] {
+  const urls = Object.entries(SERVICE_URL_PATHS)
+    .map(([k, p]) => `"${k}":"${(internal && INTERNAL_SERVICE_URLS[k]) || `$base${p}`}"`)
+    .join(",");
+  return [
+    "bash",
+    "-c",
+    `set -eu; base="\${APP_BASE_URL%/}"; dir=/application/app_data/configuration; mkdir -p "$dir"; chmod 777 "$dir"; ` +
+      `printf '%s' "{${urls.replace(/"/g, '\\"')}}" > "$dir/local_service_url.json"; exec bash entrypoint.sh`,
+  ];
+}
 
 abstract class BoldServiceContainer extends BoldContainer {
   defaultPort = 80;
@@ -133,7 +145,7 @@ abstract class BoldServiceContainer extends BoldContainer {
       const t0 = Date.now();
       await this.startAndWaitForPorts({
         ports: this.servicePort,
-        startOptions: { envVars: buildContainerEnv(request.url, this.env), entrypoint: SERVICE_ENTRYPOINT },
+        startOptions: { envVars: buildContainerEnv(request.url, this.env), entrypoint: buildServiceEntrypoint(this.env.SERVICE_COMMUNICATION !== "public_url") },
         cancellationOptions: { portReadyTimeoutMS: 180_000 },
       });
       startMs = Date.now() - t0;
@@ -154,6 +166,36 @@ function withTiming(response: Response, value: string): Response {
   return out;
 }
 
+// Internal hostname -> container. Used for intercepted container-to-container calls.
+let lastPublicBase = "";
+function internalTarget(env: MultiEnv, host: string): { fetch(r: Request): Promise<Response> } | undefined {
+  switch (host) {
+    case "id-web": return env.ID_WEB_CONTAINER.getByName("id-web");
+    case "id-api": return env.ID_API_CONTAINER.getByName("id-api");
+    case "id-ums": return env.ID_UMS_CONTAINER.getByName("id-ums");
+    case "bi-web": return env.BI_WEB_CONTAINER.getByName("bi-web");
+    case "bi-api": return env.BI_API_CONTAINER.getByName("bi-api");
+    case "bi-jobs": return env.BI_JOBS_CONTAINER.getByName("bi-jobs");
+    case "bi-designer": return env.BI_DESIGNER_CONTAINER.getByName("bi-designer");
+    case "bi-etl": return env.BI_ETL_CONTAINER.getByName("bi-etl");
+    case "bold-ai": return env.BOLD_AI_CONTAINER.getByName("bold-ai");
+    case "bold-mcp": return env.BOLD_MCP_CONTAINER.getByName("bold-mcp");
+  }
+  return undefined;
+}
+
+export async function forwardInternal(request: Request, env: MultiEnv): Promise<Response> {
+  const url = new URL(request.url);
+  const target = internalTarget(env, url.hostname);
+  if (!target) return new Response(`Unknown internal service ${url.hostname}`, { status: 502 });
+  // Same forwarding headers the public path sets, so the app resolves the tenant by the public host.
+  const base = new URL(env.APP_BASE_URL || lastPublicBase || "https://localhost");
+  const headers = new Headers(request.headers);
+  headers.set("X-Forwarded-Proto", base.protocol.slice(0, -1));
+  headers.set("X-Forwarded-Host", base.host);
+  return target.fetch(new Request(request, { headers }));
+}
+
 export class IdWebContainer extends BoldServiceContainer {}
 export class IdApiContainer extends BoldServiceContainer {}
 export class IdUmsContainer extends BoldServiceContainer {}
@@ -168,6 +210,13 @@ export class BoldAiContainer extends BoldServiceContainer {
 }
 export class BoldMcpContainer extends BoldServiceContainer {}
 
+export const OUTBOUND_HOSTS = ["id-web", "id-api", "id-ums", "bi-web", "bi-api", "bi-jobs", "bi-designer", "bi-etl", "bold-ai", "bold-mcp"];
+for (const cls of [IdWebContainer, IdApiContainer, IdUmsContainer, BiWebContainer, BiApiContainer, BiJobsContainer, BiDesignerContainer, BiEtlContainer, BoldAiContainer, BoldMcpContainer]) {
+  cls.outboundByHost = Object.fromEntries(
+    OUTBOUND_HOSTS.map((h) => [h, (req: Request, env: unknown) => forwardInternal(req, env as MultiEnv)]),
+  );
+}
+
 const HEALTH_PATHS = new Set(["/health-check", "/api/health-check", "/ums/health-check"]);
 const HEALTH_TTL_MS = 5000;
 const healthCache = new Map<string, { at: number; status: number; body: string }>();
@@ -176,6 +225,7 @@ export default {
   async fetch(request: Request, env: MultiEnv): Promise<Response> {
     const startedAt = Date.now();
     const publicUrl = new URL(request.url);
+    lastPublicBase = publicUrl.origin;
     const path = publicUrl.pathname;
 
     // Internal diagnostics

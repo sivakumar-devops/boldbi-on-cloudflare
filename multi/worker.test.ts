@@ -11,7 +11,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, SERVICE_ENTRYPOINT } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, forwardInternal, OUTBOUND_HOSTS, BiApiContainer } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -151,11 +151,36 @@ describe("multi routing tests", () => {
     expect(buildContainerEnv("https://a/", {} as MultiEnv)).not.toHaveProperty("BOLD_SERVICES_STORAGETYPE");
   });
 
-  it("entrypoint writes public service URLs then runs the vendor entrypoint", () => {
-    const script = SERVICE_ENTRYPOINT[2];
+  it("entrypoint writes public URLs when internal routing is off", () => {
+    const script = buildServiceEntrypoint(false)[2];
     expect(script).toContain('base="${APP_BASE_URL%/}"');
-    expect(script).toContain('\\"BiApi\\":\\"$base/bi/api\\"');
+    expect(script).toContain('\\"IdpApi\\":\\"$base/api\\"');
     expect(script).toContain("exec bash entrypoint.sh");
+  });
+
+  it("entrypoint uses internal hosts for server-to-server URLs only", () => {
+    const script = buildServiceEntrypoint(true)[2];
+    expect(script).toContain('\\"IdpApi\\":\\"http://id-api/api\\"');
+    expect(script).toContain('\\"BiApi\\":\\"http://bi-api/bi/api\\"');
+    expect(script).toContain('\\"Idp\\":\\"$base\\"');
+    expect(script).toContain('\\"Ums\\":\\"$base/ums\\"');
+  });
+
+  it("forwards intercepted internal calls to the target container with public host headers", async () => {
+    const { env, idApiFetch } = setup();
+    env.APP_BASE_URL = "https://app.example";
+    const res = await forwardInternal(new Request("http://id-api/api/token", { method: "POST" }), env);
+    expect(await res.text()).toBe("id-api-response");
+    const sent = (idApiFetch.mock.calls as unknown as Request[][])[0][0];
+    expect(new URL(sent.url).pathname).toBe("/api/token");
+    expect(sent.headers.get("X-Forwarded-Host")).toBe("app.example");
+    expect(sent.headers.get("X-Forwarded-Proto")).toBe("https");
+    expect((await forwardInternal(new Request("http://nope/x"), env)).status).toBe(502);
+  });
+
+  it("registers an outbound handler for every internal host", () => {
+    const hosts = Object.keys((BiApiContainer as unknown as { outboundByHost: Record<string, unknown> }).outboundByHost);
+    expect(hosts.sort()).toEqual([...OUTBOUND_HOSTS].sort());
   });
 
   it("caches successful health checks briefly", async () => {

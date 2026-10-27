@@ -93,4 +93,14 @@ Database settings are not stored as secrets: enter them manually on the UMS star
 How service URLs work: each container is started with an entrypoint override (`SERVICE_ENTRYPOINT` in `worker.ts`) that writes
 `local_service_url.json` with the public URLs before running the vendor `entrypoint.sh`. This replaces the former custom Dockerfiles.
 
-Not yet done: direct service-to-service URLs (`BI_*_SERVICE_URL`, `ID_*_SERVICE_URL`); services still call each other through the public URL.
+## Internal service-to-service routing
+
+`IdpApi`, `BiApi` and `BiJob` in `local_service_url.json` point to internal hostnames (`http://id-api/api`, `http://bi-api/bi/api`,
+`http://bi-jobs/bi/jobs`). Each container class registers `outboundByHost` handlers (`@cloudflare/containers`), so these calls are
+intercepted and delivered straight to the target Durable Object instead of leaving through the public edge and coming back.
+The forwarded request carries `X-Forwarded-Host`/`X-Forwarded-Proto` of the public URL. Browser-facing URLs (`Idp`, `Ums`, `Bi`, ...) stay public.
+
+To fall back to the old behaviour (all calls via the public URL): `npx wrangler secret put SERVICE_COMMUNICATION` with value `public_url`,
+then restart the containers (`npm run deploy`, or stop them) because the URL file is written at container start.
+
+Timing: every proxied response carries a `Server-Timing` header (`container-start`, `container-app`, `worker-total`).
