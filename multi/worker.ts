@@ -128,15 +128,30 @@ abstract class BoldServiceContainer extends BoldContainer {
   enableInternet = true;
 
   override async fetch(request: Request): Promise<Response> {
+    let startMs = 0;
     if (!this.ctx.container?.running) {
+      const t0 = Date.now();
       await this.startAndWaitForPorts({
         ports: this.servicePort,
         startOptions: { envVars: buildContainerEnv(request.url, this.env), entrypoint: SERVICE_ENTRYPOINT },
         cancellationOptions: { portReadyTimeoutMS: 180_000 },
       });
+      startMs = Date.now() - t0;
     }
-    return super.fetch(request);
+    const t1 = Date.now();
+    const response = await super.fetch(request);
+    return withTiming(response, `container-start;dur=${startMs}, container-app;dur=${Date.now() - t1}`);
   }
+}
+
+// Server-Timing lets us see where time goes: container-start (cold start), container-app (time until the
+// app returned headers), worker-total (whole Worker), so hop overhead = worker-total - container-start - container-app.
+function withTiming(response: Response, value: string): Response {
+  if (response.status === 101) return response;
+  const out = new Response(response.body, response);
+  const prev = out.headers.get("Server-Timing");
+  out.headers.set("Server-Timing", prev ? `${prev}, ${value}` : value);
+  return out;
 }
 
 export class IdWebContainer extends BoldServiceContainer {}
@@ -159,6 +174,7 @@ const healthCache = new Map<string, { at: number; status: number; body: string }
 
 export default {
   async fetch(request: Request, env: MultiEnv): Promise<Response> {
+    const startedAt = Date.now();
     const publicUrl = new URL(request.url);
     const path = publicUrl.pathname;
 
@@ -218,6 +234,6 @@ export default {
       healthCache.set(path, { at: Date.now(), status: 200, body: await targetResponse.clone().text() });
     }
 
-    return secureApplicationResponse(targetResponse, publicUrl);
+    return withTiming(secureApplicationResponse(targetResponse, publicUrl), `worker-total;dur=${Date.now() - startedAt}`);
   },
 };
