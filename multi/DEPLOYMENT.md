@@ -159,19 +159,29 @@ Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=id-api,id-
 ```
 The next request to each service starts a fresh container.
 
-## Placement (Durable Object location hint)
+## Placement (US East configuration)
 
-Every service is resolved through one function (`serviceStub` in `worker.ts`), so public routing, internal forwarding and the
-restart/diagnostic endpoints all use the same Durable Object name and the same `locationHint`. A container is placed near its Durable Object.
+Both layers are configured for US East (ENAM):
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `DO_LOCATION_HINT` | `apac` | `wnam enam sam weur eeur apac apac-ne apac-se oc afr me`, or `none` to send no hint. An unknown value falls back to `apac`. |
-| `DO_NAME_SUFFIX` | empty | Appended to every object name (`bi-web` becomes `bi-web-v2`). |
+1. **Containers (hard constraint):** Every container definition in `wrangler.jsonc` sets:
+   ```json
+   "constraints": { "regions": ["ENAM"] }
+   ```
+   This limits the scheduler to eastern North America. Cloudflare will not start the container outside ENAM unless the constraint is changed.
+   Applied on `wrangler deploy` (the full deploy, not `deploy:worker`).
 
-Limits (Cloudflare behaviour, not guaranteed by this code):
-- A hint is best effort and names a region, not a city. It applies only when a Durable Object is **first created**.
-- Existing objects keep their location, and restarting a container does not move it. To relocate, set a new `DO_NAME_SUFFIX`, which creates new objects.
-  The old objects and containers stay until `sleepAfter` (6h) expires or they are destroyed. State lives in PostgreSQL and S3, not in the containers.
-- Check the result with `GET /_internal/diag/trace?host=all` and `npx wrangler containers instances <id>`. If the services still spread across cities, try a narrower hint (`apac-se`) with a new suffix.
-- To move to the US later: set `DO_LOCATION_HINT=enam` (or `wnam`) and change `DO_NAME_SUFFIX`.
+2. **Durable Objects (location hint):** `serviceStub` passes `locationHint` on every `getByName`:
+   | Variable | Default | Meaning |
+   |---|---|---|
+   | `DO_LOCATION_HINT` | `enam` | `enam wnam weur eeur apac apac-ne apac-se sam oc afr me` or `none`. |
+   | `DO_NAME_SUFFIX` | empty | Appended to every object name (`bi-web` becomes `bi-web-us3`). |
+
+3. **Separate diagnostics:**
+   - `GET /_internal/diag/trace?host=all`: where each **container** egresses (`cdn-cgi/trace` from inside the container).
+   - `GET /_internal/diag/do-trace?host=all`: where each **Durable Object** egresses (from the isolate).
+
+4. **Limits (Cloudflare platform):**
+   - The container constraint requires capacity in ENAM. If a region runs out of capacity for that instance type, startup fails with an error rather than falling back.
+   - A Durable Object location hint is advisory, not guaranteed. It applies only at object creation time.
+   - Durable Objects and their containers are scheduled independently and are not guaranteed to be co-located.
+   - `max_instances: 1` requires that the previous container be stopped before a new suffix is launched, via `POST /_internal/restart?host=all` with the old suffix still active.

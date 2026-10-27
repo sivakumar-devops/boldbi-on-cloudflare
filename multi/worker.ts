@@ -19,7 +19,7 @@ export interface MultiEnv {
   SERVICE_COMMUNICATION?: string; // "internal" (default) | "public_url"
   INTERNAL_SERVICE_KEYS?: string; // optional: limit internal mode to these keys (troubleshooting)
   APP_BASE_URL?: string;
-  DO_LOCATION_HINT?: string; // Durable Object location hint: apac (default) | apac-se | apac-ne | enam | ... | none
+  DO_LOCATION_HINT?: string; // Durable Object location hint: enam (default) | apac | apac-ne | enam | ... | none
   DO_NAME_SUFFIX?: string; // optional, e.g. "v2": new Durable Object names, so new objects get created (and hinted)
   ADMIN_TOKEN?: string; // enables POST /_internal/restart and /_internal/diag/*
   DIAG_ENABLED?: string; // "true" records timing for internal calls (Server-Timing header + structured console.log)
@@ -217,6 +217,18 @@ abstract class BoldServiceContainer extends BoldContainer {
     }
   }
 
+  // DIAGNOSTIC (admin only): where this Durable Object itself runs. A subrequest made from a Durable Object leaves from
+  // the data center that hosts it, so Cloudflare's trace endpoint reports the DO's own colo (the container's colo is separate).
+  async doColo(): Promise<string> {
+    try {
+      const r = await fetch("https://www.cloudflare.com/cdn-cgi/trace");
+      const t = await r.text();
+      return (t.match(/^colo=(.*)$/m)?.[1] ?? "unknown") + " loc=" + (t.match(/^loc=(.*)$/m)?.[1] ?? "?");
+    } catch (e) {
+      return "error: " + String(e);
+    }
+  }
+
   // DIAGNOSTIC (admin only): run a script inside this container and return stdout/ms. Inputs are validated by callers.
   async diagExec(script: string): Promise<{ ok: boolean; out: string; err?: string }> {
     if (!this.ctx.container?.running) return { ok: false, out: "", err: "container is not running (not started yet)" };
@@ -271,9 +283,9 @@ type LocationHint = (typeof LOCATION_HINTS)[number];
 // A hint only applies when a Durable Object is first created, and it is best effort (a region, not a city).
 // Existing objects keep their location; a new DO_NAME_SUFFIX creates new objects that honour the hint.
 export function locationHintFor(env: Pick<MultiEnv, "DO_LOCATION_HINT">): LocationHint | undefined {
-  const v = (env.DO_LOCATION_HINT ?? "apac").trim().toLowerCase();
+  const v = (env.DO_LOCATION_HINT ?? "enam").trim().toLowerCase();
   if (v === "none" || v === "") return undefined;
-  return (LOCATION_HINTS as readonly string[]).includes(v) ? (v as LocationHint) : "apac";
+  return (LOCATION_HINTS as readonly string[]).includes(v) ? (v as LocationHint) : "enam";
 }
 
 const SERVICE_BINDINGS: Record<string, keyof MultiEnv> = {
@@ -408,6 +420,7 @@ function clampInt(v: string | null, def: number, min: number, max: number): numb
 // /_internal/diag/trace?host=all|id-web,...   container egress colo via cdn-cgi/trace (approximates container location)
 // /_internal/diag/curl?from=bi-web&to=bi-api&path=/bi/api/health-check&n=20   timing breakdown per request, run inside "from"
 // /_internal/diag/tcp?from=bi-api&host=<db-or-s3-host>&port=5432&n=10         TCP connect time from inside the container
+// /_internal/diag/do-trace?host=all          colo of each Durable Object itself (separate from its container)
 // /_internal/diag/resources?host=all          load average, memory, CPU count, uptime inside each container
 async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string): Promise<Response> {
   const hostsParam = url.searchParams.get("host") ?? "all";
@@ -423,6 +436,13 @@ async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string):
       out[h] = r.ok ? r.out : r.err;
     }
     return Response.json({ worker: { colo: colo ?? null }, containers: out });
+  }
+
+  // Durable Object location, next to the container location from /diag/trace. They can differ.
+  if (path === "/_internal/diag/do-trace") {
+    const out: Record<string, unknown> = {};
+    for (const h of hosts) out[h] = await (internalTarget(env, h) as unknown as { doColo(): Promise<string> }).doColo();
+    return Response.json({ worker: { colo: colo ?? null }, durableObjects: out });
   }
 
   if (path === "/_internal/diag/resources") {

@@ -348,11 +348,11 @@ describe("diag curl local mode", () => {
 });
 
 describe("Durable Object placement", () => {
-  it("defaults to apac, accepts valid hints, falls back to apac on junk, and none disables", () => {
-    expect(locationHintFor({})).toBe("apac");
+  it("defaults to enam, accepts valid hints, falls back to apac on junk, and none disables", () => {
+    expect(locationHintFor({})).toBe("enam");
     expect(locationHintFor({ DO_LOCATION_HINT: "APAC-SE" })).toBe("apac-se");
-    expect(locationHintFor({ DO_LOCATION_HINT: "enam" })).toBe("enam");
-    expect(locationHintFor({ DO_LOCATION_HINT: "mars" })).toBe("apac");
+    expect(locationHintFor({ DO_LOCATION_HINT: "apac" })).toBe("apac");
+    expect(locationHintFor({ DO_LOCATION_HINT: "mars" })).toBe("enam");
     expect(locationHintFor({ DO_LOCATION_HINT: "none" })).toBeUndefined();
   });
 
@@ -365,7 +365,7 @@ describe("Durable Object placement", () => {
     for (const ns of all) {
       const calls = (ns.getByName as unknown as ReturnType<typeof vi.fn>).mock.calls;
       expect(calls.length).toBeGreaterThan(0);
-      for (const c of calls) expect(c[1]).toEqual({ locationHint: "apac" });
+      for (const c of calls) expect(c[1]).toEqual({ locationHint: "enam" });
     }
   });
 
@@ -374,5 +374,16 @@ describe("Durable Object placement", () => {
     serviceStub({ ...env, DO_NAME_SUFFIX: "v2", DO_LOCATION_HINT: "none" }, "bi-web");
     expect((env.BI_WEB_CONTAINER.getByName as unknown as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(["bi-web-v2", undefined]);
     expect(serviceStub(env, "nope")).toBeUndefined();
+  });
+});
+
+describe("wrangler placement config", () => {
+  it("constrains all 10 containers to ENAM and keeps one instance each", () => {
+    const cfg = JSON.parse(readFileSync("wrangler.jsonc", "utf8"));
+    expect(cfg.containers).toHaveLength(10);
+    for (const c of cfg.containers) {
+      expect(c.constraints).toEqual({ regions: ["ENAM"] });
+      expect(c.max_instances).toBe(1);
+    }
   });
 });
