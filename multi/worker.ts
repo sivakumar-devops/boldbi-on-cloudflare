@@ -16,6 +16,7 @@ export interface MultiEnv {
   BOLD_MCP_CONTAINER: DurableObjectNamespace<BoldMcpContainer>;
 
   // Optional overrides / secrets
+  INTERNAL_SERVICE_KEYS?: string;
   SERVICE_COMMUNICATION?: string; // "public_url" = every service call goes via the public URL; default = internal routing
   APP_BASE_URL?: string;
   ADMIN_TOKEN?: string; // enables POST /_internal/restart
@@ -115,19 +116,21 @@ const SERVICE_URL_PATHS: Record<string, string> = {
   ReportsService: "/reporting/reportservice", ReportsViewer: "/reporting/viewer",
   ReportsAi: "/reportsai", ReportsMcp: "/reportsmcp",
 };
-// Server-to-server URLs that are sent to internal hostnames. The container's outbound HTTP for these hosts is
+// Server-to-server URLs sent to internal hostnames by default. The container's outbound HTTP for these hosts is
 // intercepted (see OUTBOUND_HOSTS) and delivered straight to the target Durable Object, skipping the public
-// edge (DNS, TLS, Worker, return path). Browser-facing URLs (Idp, Ums, Bi, ...) stay public because the
-// browser follows them. Set SERVICE_COMMUNICATION=public_url to turn this off.
-const INTERNAL_SERVICE_URLS: Record<string, string> = {
+// edge. Browser-facing URLs (Idp, Ums, Bi, ...) stay public because the browser follows them.
+//   SERVICE_COMMUNICATION=public_url  -> every URL is public (no internal routing)
+//   unset / "internal" (default)      -> the keys below use internal URLs
+//   INTERNAL_SERVICE_KEYS="IdpApi,BiApi,BiJob"  -> optional override of which keys are internal
+export const INTERNAL_SERVICE_URLS: Record<string, string> = {
   IdpApi: "http://id-api/api",
   BiApi: "http://bi-api/bi/api",
   BiJob: "http://bi-jobs/bi/jobs",
 };
 
-export function buildServiceEntrypoint(internal: boolean): string[] {
+export function buildServiceEntrypoint(internalKeys: string[]): string[] {
   const urls = Object.entries(SERVICE_URL_PATHS)
-    .map(([k, p]) => `"${k}":"${(internal && INTERNAL_SERVICE_URLS[k]) || `$base${p}`}"`)
+    .map(([k, p]) => `"${k}":"${(internalKeys.includes(k) && INTERNAL_SERVICE_URLS[k]) || `$base${p}`}"`)
     .join(",");
   return [
     "bash",
@@ -135,6 +138,12 @@ export function buildServiceEntrypoint(internal: boolean): string[] {
     `set -eu; base="\${APP_BASE_URL%/}"; dir=/application/app_data/configuration; mkdir -p "$dir"; chmod 777 "$dir"; ` +
       `printf '%s' "{${urls.replace(/"/g, '\\"')}}" > "$dir/local_service_url.json"; exec bash entrypoint.sh`,
   ];
+}
+
+export function internalKeysFor(env: Pick<MultiEnv, "SERVICE_COMMUNICATION" | "INTERNAL_SERVICE_KEYS">): string[] {
+  if ((env.SERVICE_COMMUNICATION ?? "").trim().toLowerCase() === "public_url") return [];
+  if (env.INTERNAL_SERVICE_KEYS) return env.INTERNAL_SERVICE_KEYS.split(",").map((k) => k.trim()).filter((k) => k in INTERNAL_SERVICE_URLS);
+  return Object.keys(INTERNAL_SERVICE_URLS);
 }
 
 // TEMPORARY diagnostic: health-check paths per internal host, used by /_internal/ping-internal.
@@ -185,7 +194,7 @@ abstract class BoldServiceContainer extends BoldContainer {
       const t0 = Date.now();
       await this.startAndWaitForPorts({
         ports: this.servicePort,
-        startOptions: { envVars: buildContainerEnv(request.url, this.env), entrypoint: buildServiceEntrypoint(this.env.SERVICE_COMMUNICATION !== "public_url") },
+        startOptions: { envVars: buildContainerEnv(request.url, this.env), entrypoint: buildServiceEntrypoint(internalKeysFor(this.env)) },
         cancellationOptions: { portReadyTimeoutMS: 180_000 },
       });
       startMs = Date.now() - t0;

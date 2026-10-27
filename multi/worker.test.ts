@@ -12,7 +12,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, forwardInternal, OUTBOUND_HOSTS, BiApiContainer } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, forwardInternal, OUTBOUND_HOSTS, BiApiContainer } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -153,14 +153,14 @@ describe("multi routing tests", () => {
   });
 
   it("entrypoint writes public URLs when internal routing is off", () => {
-    const script = buildServiceEntrypoint(false)[2];
+    const script = buildServiceEntrypoint([])[2];
     expect(script).toContain('base="${APP_BASE_URL%/}"');
     expect(script).toContain('\\"IdpApi\\":\\"$base/api\\"');
     expect(script).toContain("exec bash entrypoint.sh");
   });
 
   it("entrypoint uses internal hosts for server-to-server URLs only", () => {
-    const script = buildServiceEntrypoint(true)[2];
+    const script = buildServiceEntrypoint(internalKeysFor({}))[2];
     expect(script).toContain('\\"IdpApi\\":\\"http://id-api/api\\"');
     expect(script).toContain('\\"BiApi\\":\\"http://bi-api/bi/api\\"');
     expect(script).toContain('\\"Idp\\":\\"$base\\"');
@@ -206,6 +206,14 @@ describe("multi routing tests", () => {
     const ok = await call(withToken, "s3cret");
     expect(await ok.json()).toEqual({ results: { "id-api": "restarted" } });
     expect(restartContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects internal keys from SERVICE_COMMUNICATION / INTERNAL_SERVICE_KEYS", () => {
+    expect(internalKeysFor({})).toEqual(["IdpApi", "BiApi", "BiJob"]);
+    expect(internalKeysFor({ SERVICE_COMMUNICATION: "internal" })).toEqual(["IdpApi", "BiApi", "BiJob"]);
+    expect(internalKeysFor({ SERVICE_COMMUNICATION: "public_url" })).toEqual([]);
+    expect(internalKeysFor({ SERVICE_COMMUNICATION: " Public_URL " , INTERNAL_SERVICE_KEYS: "IdpApi"})).toEqual([]);
+    expect(internalKeysFor({ INTERNAL_SERVICE_KEYS: "IdpApi, Bogus" })).toEqual(["IdpApi"]);
   });
 
   it("caches successful health checks briefly", async () => {

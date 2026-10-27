@@ -100,8 +100,16 @@ How service URLs work: each container is started with an entrypoint override (`S
 intercepted and delivered straight to the target Durable Object instead of leaving through the public edge and coming back.
 The forwarded request carries `X-Forwarded-Host`/`X-Forwarded-Proto` of the public URL. Browser-facing URLs (`Idp`, `Ums`, `Bi`, ...) stay public.
 
-To fall back to the old behaviour (all calls via the public URL): `npx wrangler secret put SERVICE_COMMUNICATION` with value `public_url`,
-then restart the containers (`npm run deploy`, or stop them) because the URL file is written at container start.
+Variables (set with `npx wrangler secret put <NAME>`, or `vars` in `wrangler.jsonc`; read when a container starts):
+
+| Name | Value | Effect |
+|---|---|---|
+| `SERVICE_COMMUNICATION` | unset or `internal` (default) | `IdpApi`, `BiApi`, `BiJob` use internal URLs |
+| `SERVICE_COMMUNICATION` | `public_url` | every service URL is the public URL |
+| `INTERNAL_SERVICE_KEYS` | e.g. `IdpApi,BiApi` | optional subset of the three keys to keep internal (ignored when `public_url`) |
+
+After changing either, restart the containers so the URL file is rewritten:
+`Invoke-RestMethod -Method Post -Headers @{ "X-Admin-Token" = "<token>" } "$b/_internal/restart?host=all"`.
 
 Timing: every proxied response carries a `Server-Timing` header (`container-start`, `container-app`, `worker-total`).
 
