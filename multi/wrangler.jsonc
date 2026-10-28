@@ -124,7 +124,10 @@
       }
     ]
   },
+  "cache": { "enabled": true },
   "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "StaticAssets": { "type": "worker", "cache": { "enabled": true } },
     "IdWebContainer": {
       "type": "durable-object",
       "storage": "sqlite"

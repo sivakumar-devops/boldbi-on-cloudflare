@@ -1,4 +1,5 @@
 import { Container } from "@cloudflare/containers";
+import { WorkerEntrypoint } from "cloudflare:workers";
 
 // Required for outbound interception (outboundByHost): the platform routes intercepted calls through it.
 export { ContainerProxy } from "@cloudflare/containers";
@@ -22,6 +23,8 @@ export interface MultiEnv {
   DO_LOCATION_HINT?: string; // Durable Object location hint: enam (default) | apac | apac-ne | enam | ... | none
   DO_NAME_SUFFIX?: string; // optional, e.g. "v2": new Durable Object names, so new objects get created (and hinted)
   ADMIN_TOKEN?: string; // enables POST /_internal/restart and /_internal/diag/*
+  STATIC_CACHE?: string; // "true" serves allow-listed static assets through the cached StaticAssets entrypoint (Workers Caching)
+  STATIC_CACHE_UNVERSIONED_TTL?: string; // seconds for static files without a version in the URL (default 3600, 0 = do not cache)
   DIAG_ENABLED?: string; // "true" records timing for internal calls (Server-Timing header + structured console.log)
 
   // Shared file storage (AWS S3, vendor "storage type 3")
@@ -510,12 +513,62 @@ async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string):
   return new Response("Not found", { status: 404 });
 }
 
+// ---- Static asset caching (Workers Caching) -------------------------------------------------------------
+// The default export is the gateway (caching disabled in wrangler.jsonc, it runs on every request). Only requests that
+// pass staticCacheEligible() are forwarded, stripped of Cookie/Authorization, to the StaticAssets entrypoint, which has
+// caching enabled. Everything else (tenant content under /bi/site, APIs, UMS, logins) never reaches the cache.
+const STATIC_PREFIXES = ["/bi/cdn/", "/bi/designer/cultures/"];
+const STATIC_EXACT = ["/bi/js/localizationcontent.js"];
+const STATIC_TYPE = /^(text\/css|(text|application)\/javascript|image\/|font\/|application\/(font|x-font)[-\w.]*|application\/vnd\.ms-fontobject)/i;
+
+export function staticCacheEligible(request: Request, env: MultiEnv): boolean {
+  if (env.STATIC_CACHE !== "true") return false;
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  if (request.headers.has("Range") || request.headers.has("Upgrade")) return false;
+  const p = new URL(request.url).pathname;
+  if (p.includes("//") || p.includes("..") || p.includes("%")) return false;
+  return STATIC_EXACT.includes(p) || STATIC_PREFIXES.some((x) => p.startsWith(x) && p.length > x.length);
+}
+
+export function staticCacheTtl(url: URL, env: MultiEnv): number {
+  const v = url.searchParams.get("v") ?? url.searchParams.get("version");
+  if (url.pathname === "/bi/js/localizationcontent.js") return 600;
+  if (v) return /^\d+(\.\d+)+$/.test(v) ? 86400 : 2592000; // release number: 1 day; content hash: 30 days
+  const n = Number(env.STATIC_CACHE_UNVERSIONED_TTL ?? 3600);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 86400) : 0;
+}
+
+// Decides what the cache may keep. Anything doubtful becomes no-store.
+export function applyStaticCachePolicy(response: Response, url: URL, env: MultiEnv): Response {
+  const out = new Response(response.body, response);
+  const ttl = staticCacheTtl(url, env);
+  const ok = response.status === 200 && ttl > 0 && !response.headers.has("Set-Cookie") &&
+    STATIC_TYPE.test(response.headers.get("Content-Type") ?? "") && !/\*/.test(response.headers.get("Vary") ?? "");
+  if (ok) {
+    const immutable = ttl >= 2592000 ? ", immutable" : "";
+    out.headers.set("Cache-Control", `public, max-age=${ttl}${immutable}`);
+    out.headers.set("Cache-Tag", "static");
+  } else {
+    out.headers.set("Cache-Control", "no-store");
+  }
+  return out;
+}
+
+export class StaticAssets extends WorkerEntrypoint<MultiEnv> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const host = url.pathname.startsWith("/bi/designer/") ? "bi-designer" : "bi-web";
+    const response = await serviceStub(this.env, host)!.fetch(request);
+    return applyStaticCachePolicy(response, url, this.env);
+  }
+}
+
 const HEALTH_PATHS = new Set(["/health-check", "/api/health-check", "/ums/health-check"]);
 const HEALTH_TTL_MS = 5000;
 const healthCache = new Map<string, { at: number; status: number; body: string }>();
 
 export default {
-  async fetch(request: Request, env: MultiEnv): Promise<Response> {
+  async fetch(request: Request, env: MultiEnv, ctx?: { exports?: Record<string, { fetch(r: Request): Promise<Response> }> }): Promise<Response> {
     const startedAt = Date.now();
     const publicUrl = new URL(request.url);
     lastPublicBase = publicUrl.origin;
@@ -582,6 +635,14 @@ export default {
     headers.set("X-Forwarded-Host", publicUrl.host);
 
     const forwardRequest = new Request(request, { headers });
+
+    if (staticCacheEligible(request, env) && ctx?.exports?.StaticAssets) {
+      const clean = new Headers(headers);
+      clean.delete("Cookie");
+      clean.delete("Authorization");
+      const cached = await ctx.exports.StaticAssets.fetch(new Request(request, { headers: clean }));
+      return withTiming(secureApplicationResponse(cached, publicUrl), `worker-total;dur=${Date.now() - startedAt}`);
+    }
 
     // Path-based routing matching Syncfusion multi-container default.conf. Longest prefix first.
     const under = (p: string) => path === p || path.startsWith(p + "/");

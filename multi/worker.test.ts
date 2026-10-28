@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class { env: unknown; constructor(_c: unknown, env: unknown) { this.env = env; } } }));
+
 vi.mock("@cloudflare/containers", () => ({
   ContainerProxy: class {},
   Container: class {
@@ -16,7 +18,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport, locationHintFor, serviceStub } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport, locationHintFor, serviceStub, staticCacheEligible, staticCacheTtl, applyStaticCachePolicy } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -385,5 +387,55 @@ describe("wrangler placement config", () => {
       expect(c.constraints).toEqual({ regions: ["ENAM"] });
       expect(c.max_instances).toBe(1);
     }
+  });
+});
+
+describe("static asset caching", () => {
+  const on = (o: Partial<MultiEnv> = {}) => ({ STATIC_CACHE: "true", ...o }) as MultiEnv;
+  const req = (p: string, init?: RequestInit) => new Request("https://app.example" + p, init);
+
+  it("is off unless STATIC_CACHE=true", () => {
+    expect(staticCacheEligible(req("/bi/cdn/scripts/a.js?v=x"), {} as MultiEnv)).toBe(false);
+  });
+  it("allows only listed static GET/HEAD paths", () => {
+    for (const p of ["/bi/cdn/scripts/a.min.js?v=abc", "/bi/designer/cultures/x.js?version=17.1.30", "/bi/js/localizationcontent.js?v=17.1.30&c=en-US"])
+      expect(staticCacheEligible(req(p), on())).toBe(true);
+    for (const p of ["/bi/site/site1/content/images/favicon.ico", "/bi/api/x", "/ums/a.js", "/bi/cdn/", "/bi//cdn/a.js", "/bi/cdn/../site/x", "/api/health-check", "/"])
+      expect(staticCacheEligible(req(p), on())).toBe(false);
+    expect(staticCacheEligible(req("/bi/cdn/a.js", { method: "POST" }), on())).toBe(false);
+    expect(staticCacheEligible(req("/bi/cdn/a.js", { headers: { Range: "bytes=0-1" } }), on())).toBe(false);
+  });
+  it("sets TTL by version type", () => {
+    expect(staticCacheTtl(new URL("https://a/bi/cdn/a.js?v=Ser7ThB3"), on())).toBe(2592000);
+    expect(staticCacheTtl(new URL("https://a/bi/cdn/a.js?version=17.1.30"), on())).toBe(86400);
+    expect(staticCacheTtl(new URL("https://a/bi/cdn/a.woff"), on())).toBe(3600);
+    expect(staticCacheTtl(new URL("https://a/bi/cdn/a.woff"), on({ STATIC_CACHE_UNVERSIONED_TTL: "0" }))).toBe(0);
+  });
+  it("caches only clean 200 static responses", () => {
+    const u = new URL("https://a/bi/cdn/a.js?v=abc");
+    const good = applyStaticCachePolicy(new Response("x", { headers: { "Content-Type": "text/javascript" } }), u, on());
+    expect(good.headers.get("Cache-Control")).toContain("public, max-age=2592000");
+    const bad = [
+      new Response("x", { status: 500, headers: { "Content-Type": "text/javascript" } }),
+      new Response("x", { status: 302, headers: { "Content-Type": "text/javascript" } }),
+      new Response("x", { headers: { "Content-Type": "text/html" } }),
+      new Response("x", { headers: { "Content-Type": "text/javascript", "Set-Cookie": "a=b" } }),
+      new Response("x", { headers: { "Content-Type": "text/javascript", Vary: "*" } }),
+    ];
+    for (const r of bad) expect(applyStaticCachePolicy(r, u, on()).headers.get("Cache-Control")).toBe("no-store");
+  });
+  it("gateway strips Cookie/Authorization before the cached entrypoint, and leaves other paths alone", async () => {
+    const { env, biWebFetch } = setup();
+    const seen: Request[] = [];
+    const ctx = { exports: { StaticAssets: { fetch: async (r: Request) => (seen.push(r), new Response("js", { headers: { "Content-Type": "text/javascript" } })) } } };
+    const e = { ...env, STATIC_CACHE: "true" } as MultiEnv;
+    const h = { Cookie: "s=1", Authorization: "Bearer t" };
+    await worker.fetch(new Request("https://app.example/bi/cdn/scripts/a.js?v=abc", { headers: h }), e, ctx);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].headers.get("Cookie")).toBeNull();
+    expect(seen[0].headers.get("Authorization")).toBeNull();
+    await worker.fetch(new Request("https://app.example/bi/site/site1/x.ico", { headers: h }), e, ctx);
+    expect(seen).toHaveLength(1);
+    expect(biWebFetch).toHaveBeenCalledTimes(1);
   });
 });
