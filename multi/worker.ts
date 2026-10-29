@@ -1,4 +1,5 @@
 import { Container } from "@cloudflare/containers";
+import { WorkerEntrypoint } from "cloudflare:workers";
 
 // Required for outbound interception (outboundByHost): the platform routes intercepted calls through it.
 export { ContainerProxy } from "@cloudflare/containers";
@@ -19,7 +20,12 @@ export interface MultiEnv {
   SERVICE_COMMUNICATION?: string; // "internal" (default) | "public_url"
   INTERNAL_SERVICE_KEYS?: string; // optional: limit internal mode to these keys (troubleshooting)
   APP_BASE_URL?: string;
-  ADMIN_TOKEN?: string; // enables POST /_internal/restart
+  DO_LOCATION_HINT?: string; // Durable Object location hint: enam (default) | apac | apac-ne | enam | ... | none
+  DO_NAME_SUFFIX?: string; // optional, e.g. "v2": new Durable Object names, so new objects get created (and hinted)
+  ADMIN_TOKEN?: string; // enables POST /_internal/restart and /_internal/diag/*
+  STATIC_CACHE?: string; // "true" serves allow-listed static assets through the cached StaticAssets entrypoint (Workers Caching)
+  STATIC_CACHE_UNVERSIONED_TTL?: string; // seconds for static files without a version in the URL (default 3600, 0 = do not cache)
+  DIAG_ENABLED?: string; // "true" records timing for internal calls (Server-Timing header + structured console.log)
 
   // Shared file storage (AWS S3, vendor "storage type 3")
   BOLD_SERVICES_AMAZON_BUCKET_NAME?: string;
@@ -214,6 +220,30 @@ abstract class BoldServiceContainer extends BoldContainer {
     }
   }
 
+  // DIAGNOSTIC (admin only): where this Durable Object itself runs. A subrequest made from a Durable Object leaves from
+  // the data center that hosts it, so Cloudflare's trace endpoint reports the DO's own colo (the container's colo is separate).
+  async doColo(): Promise<string> {
+    try {
+      const r = await fetch("https://www.cloudflare.com/cdn-cgi/trace");
+      const t = await r.text();
+      return (t.match(/^colo=(.*)$/m)?.[1] ?? "unknown") + " loc=" + (t.match(/^loc=(.*)$/m)?.[1] ?? "?");
+    } catch (e) {
+      return "error: " + String(e);
+    }
+  }
+
+  // DIAGNOSTIC (admin only): run a script inside this container and return stdout/ms. Inputs are validated by callers.
+  async diagExec(script: string): Promise<{ ok: boolean; out: string; err?: string }> {
+    if (!this.ctx.container?.running) return { ok: false, out: "", err: "container is not running (not started yet)" };
+    try {
+      const proc = await this.ctx.container.exec(["bash", "-c", script]);
+      const r = await proc.output();
+      return { ok: true, out: new TextDecoder().decode(r.stdout).trim(), err: new TextDecoder().decode(r.stderr).slice(0, 300) || undefined };
+    } catch (e) {
+      return { ok: false, out: "", err: String(e) };
+    }
+  }
+
   // Stops the container so the next request starts a fresh one (re-writes local_service_url.json, re-reads env).
   async restartContainer(): Promise<boolean> {
     if (!this.ctx.container?.running) return false;
@@ -250,23 +280,78 @@ function withTiming(response: Response, value: string): Response {
 
 // Internal hostname -> container. Used for intercepted container-to-container calls.
 let lastPublicBase = "";
+const LOCATION_HINTS = ["wnam", "enam", "sam", "weur", "eeur", "apac", "apac-ne", "apac-se", "oc", "afr", "me"] as const;
+type LocationHint = (typeof LOCATION_HINTS)[number];
+
+// A hint only applies when a Durable Object is first created, and it is best effort (a region, not a city).
+// Existing objects keep their location; a new DO_NAME_SUFFIX creates new objects that honour the hint.
+export function locationHintFor(env: Pick<MultiEnv, "DO_LOCATION_HINT">): LocationHint | undefined {
+  const v = (env.DO_LOCATION_HINT ?? "enam").trim().toLowerCase();
+  if (v === "none" || v === "") return undefined;
+  return (LOCATION_HINTS as readonly string[]).includes(v) ? (v as LocationHint) : "enam";
+}
+
+const SERVICE_BINDINGS: Record<string, keyof MultiEnv> = {
+  "id-web": "ID_WEB_CONTAINER", "id-api": "ID_API_CONTAINER", "id-ums": "ID_UMS_CONTAINER",
+  "bi-web": "BI_WEB_CONTAINER", "bi-api": "BI_API_CONTAINER", "bi-jobs": "BI_JOBS_CONTAINER",
+  "bi-designer": "BI_DESIGNER_CONTAINER", "bi-etl": "BI_ETL_CONTAINER",
+  "bold-ai": "BOLD_AI_CONTAINER", "bold-mcp": "BOLD_MCP_CONTAINER",
+};
+
+// The single place that resolves a service name to its Durable Object (and so its container).
+export function serviceStub(env: MultiEnv, host: string): { fetch(r: Request): Promise<Response> } | undefined {
+  const binding = SERVICE_BINDINGS[host];
+  if (!binding) return undefined;
+  const ns = env[binding] as unknown as DurableObjectNamespace;
+  const suffix = (env.DO_NAME_SUFFIX ?? "").trim();
+  const hint = locationHintFor(env);
+  return ns.getByName(suffix ? `${host}-${suffix}` : host, hint ? { locationHint: hint } : undefined);
+}
+
 function internalTarget(env: MultiEnv, host: string): { fetch(r: Request): Promise<Response> } | undefined {
-  switch (host) {
-    case "id-web": return env.ID_WEB_CONTAINER.getByName("id-web");
-    case "id-api": return env.ID_API_CONTAINER.getByName("id-api");
-    case "id-ums": return env.ID_UMS_CONTAINER.getByName("id-ums");
-    case "bi-web": return env.BI_WEB_CONTAINER.getByName("bi-web");
-    case "bi-api": return env.BI_API_CONTAINER.getByName("bi-api");
-    case "bi-jobs": return env.BI_JOBS_CONTAINER.getByName("bi-jobs");
-    case "bi-designer": return env.BI_DESIGNER_CONTAINER.getByName("bi-designer");
-    case "bi-etl": return env.BI_ETL_CONTAINER.getByName("bi-etl");
-    case "bold-ai": return env.BOLD_AI_CONTAINER.getByName("bold-ai");
-    case "bold-mcp": return env.BOLD_MCP_CONTAINER.getByName("bold-mcp");
-  }
-  return undefined;
+  return serviceStub(env, host);
+}
+
+// Samples kept per isolate (best effort: the outbound handler may run in a different isolate than the public
+// fetch handler, so the structured console.log lines are the authoritative source for percentiles).
+const internalStats = new Map<string, { totals: number[]; apps: number[]; errors: number }>();
+const MAX_SAMPLES = 2000;
+
+export function recordInternal(host: string, totalMs: number, appMs: number | undefined, error: boolean): void {
+  const s = internalStats.get(host) ?? { totals: [], apps: [], errors: 0 };
+  s.totals.push(totalMs);
+  if (appMs !== undefined) s.apps.push(appMs);
+  if (error) s.errors++;
+  if (s.totals.length > MAX_SAMPLES) s.totals.shift();
+  if (s.apps.length > MAX_SAMPLES) s.apps.shift();
+  internalStats.set(host, s);
+}
+
+export function percentile(sorted: number[], p: number): number | null {
+  if (!sorted.length) return null;
+  return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
+}
+
+function summarize(values: number[]) {
+  const v = [...values].sort((a, b) => a - b);
+  const avg = v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  return { n: v.length, avg: avg === null ? null : Math.round(avg), p50: percentile(v, 50), p95: percentile(v, 95), p99: percentile(v, 99) };
+}
+
+export function internalStatsReport() {
+  return Object.fromEntries(
+    [...internalStats].map(([host, s]) => [host, { total: summarize(s.totals), app: summarize(s.apps), errors: s.errors }]),
+  );
+}
+
+function appDuration(serverTiming: string | null): number | undefined {
+  const m = /container-app;dur=([\d.]+)/.exec(serverTiming ?? "");
+  return m ? Number(m[1]) : undefined;
 }
 
 export async function forwardInternal(request: Request, env: MultiEnv): Promise<Response> {
+  const diag = env.DIAG_ENABLED === "true";
+  const t0 = Date.now();
   const url = new URL(request.url);
   const target = internalTarget(env, url.hostname);
   if (!target) return new Response(`Unknown internal service ${url.hostname}`, { status: 502 });
@@ -275,7 +360,33 @@ export async function forwardInternal(request: Request, env: MultiEnv): Promise<
   const headers = new Headers(request.headers);
   headers.set("X-Forwarded-Proto", base.protocol.slice(0, -1));
   headers.set("X-Forwarded-Host", base.host);
-  return target.fetch(new Request(request, { headers }));
+  if (!diag) return target.fetch(new Request(request, { headers }));
+
+  // Diagnostics only. Stages observable here: stub resolution, and the target fetch (DO RPC + container start + app).
+  const tStub = Date.now();
+  let response: Response;
+  try {
+    response = await target.fetch(new Request(request, { headers }));
+  } catch (e) {
+    recordInternal(url.hostname, Date.now() - t0, undefined, true);
+    console.log(JSON.stringify({ diag: "internal", host: url.hostname, method: request.method, path: url.pathname, error: String(e), totalMs: Date.now() - t0 }));
+    throw e;
+  }
+  const tDone = Date.now();
+  const timing = response.headers.get("Server-Timing");
+  const appMs = appDuration(timing);
+  const totalMs = tDone - t0;
+  recordInternal(url.hostname, totalMs, appMs, response.status >= 500);
+  console.log(JSON.stringify({
+    diag: "internal", host: url.hostname, method: request.method, path: url.pathname, status: response.status,
+    totalMs, prepMs: tStub - t0, targetFetchMs: tDone - tStub, appMs,
+    // targetFetchMs - appMs = DO RPC + container.fetch overhead (+ container start when cold)
+    overheadMs: appMs === undefined ? undefined : tDone - tStub - appMs,
+  }));
+  if (response.status === 101) return response;
+  const out = new Response(response.body, response);
+  out.headers.append("Server-Timing", `internal-forward;dur=${totalMs}`);
+  return out;
 }
 
 export class IdWebContainer extends BoldServiceContainer {}
@@ -299,12 +410,165 @@ for (const cls of [IdWebContainer, IdApiContainer, IdUmsContainer, BiWebContaine
   );
 }
 
+type DiagContainer = { diagExec(script: string): Promise<{ ok: boolean; out: string; err?: string }> };
+const SAFE_HOST = /^[A-Za-z0-9.-]{1,253}$/;
+const SAFE_PATH = /^\/[A-Za-z0-9._~\/-]{0,200}$/;
+
+function clampInt(v: string | null, def: number, min: number, max: number): number {
+  const n = Number.parseInt(v ?? "", 10);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
+}
+
+// /_internal/diag/stats                       per-host internal forward stats (this isolate only)
+// /_internal/diag/trace?host=all|id-web,...   container egress colo via cdn-cgi/trace (approximates container location)
+// /_internal/diag/curl?from=bi-web&to=bi-api&path=/bi/api/health-check&n=20   timing breakdown per request, run inside "from"
+// /_internal/diag/tcp?from=bi-api&host=<db-or-s3-host>&port=5432&n=10         TCP connect time from inside the container
+// /_internal/diag/do-trace?host=all          colo of each Durable Object itself (separate from its container)
+// /_internal/diag/resources?host=all          load average, memory, CPU count, uptime inside each container
+async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string): Promise<Response> {
+  const hostsParam = url.searchParams.get("host") ?? "all";
+  const hosts = hostsParam === "all" ? OUTBOUND_HOSTS : hostsParam.split(",").filter((h) => OUTBOUND_HOSTS.includes(h));
+  const exec = (h: string, script: string) => (internalTarget(env, h) as unknown as DiagContainer).diagExec(script);
+
+  if (path === "/_internal/diag/stats") return Response.json({ note: "samples are per isolate; use DIAG_ENABLED logs for full percentiles", hosts: internalStatsReport() });
+
+  if (path === "/_internal/diag/trace") {
+    const out: Record<string, unknown> = {};
+    for (const h of hosts) {
+      const r = await exec(h, "curl -s -m 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(colo|loc|ip|http)=' | tr '\\n' ' '");
+      out[h] = r.ok ? r.out : r.err;
+    }
+    return Response.json({ worker: { colo: colo ?? null }, containers: out });
+  }
+
+  // Durable Object location, next to the container location from /diag/trace. They can differ.
+  if (path === "/_internal/diag/do-trace") {
+    const out: Record<string, unknown> = {};
+    for (const h of hosts) out[h] = await (internalTarget(env, h) as unknown as { doColo(): Promise<string> }).doColo();
+    return Response.json({ worker: { colo: colo ?? null }, durableObjects: out });
+  }
+
+  if (path === "/_internal/diag/resources") {
+    const out: Record<string, unknown> = {};
+    for (const h of hosts) {
+      const r = await exec(h, "echo \"cpus=$(nproc) load=$(cut -d' ' -f1-3 /proc/loadavg) $(grep -E 'MemTotal|MemAvailable' /proc/meminfo | tr -s ' ' | tr '\\n' ' ') uptime_s=$(cut -d. -f1 /proc/uptime)\"; cat /sys/fs/cgroup/cpu.stat 2>/dev/null | grep -E 'throttled|nr_periods' | tr '\\n' ' '");
+      out[h] = r.ok ? r.out : r.err;
+    }
+    return Response.json(out);
+  }
+
+  const from = url.searchParams.get("from") ?? "";
+  if (!OUTBOUND_HOSTS.includes(from)) return Response.json({ error: "from must be one of " + OUTBOUND_HOSTS.join(",") }, { status: 400 });
+  const n = clampInt(url.searchParams.get("n"), 10, 1, 100);
+
+  if (path === "/_internal/diag/curl") {
+    const to = url.searchParams.get("to") ?? "";
+    const p = url.searchParams.get("path") ?? "/";
+    const target = url.searchParams.get("target"); // optional absolute public URL host (for public_url comparison)
+    if (!SAFE_PATH.test(p)) return Response.json({ error: "bad path" }, { status: 400 });
+    let base: string;
+    let extra = "";
+    if (url.searchParams.get("local") === "1") {
+      // App-only time: call the service on loopback inside its own container (no interception, no DO hop).
+      // Forwarded headers mimic the Worker so tenant resolution behaves the same.
+      base = `http://127.0.0.1:${from === "bold-ai" ? 8080 : 80}`;
+      const pub = /^[A-Za-z0-9.:-]{1,260}$/.test(url.host) ? url.host : "localhost";
+      extra = ` -H 'X-Forwarded-Host: ${pub}' -H 'X-Forwarded-Proto: https'`;
+    } else if (target) {
+      if (!SAFE_HOST.test(target)) return Response.json({ error: "bad target" }, { status: 400 });
+      base = `https://${target}`;
+    } else {
+      if (!OUTBOUND_HOSTS.includes(to)) return Response.json({ error: "to must be an internal host or pass target=<public host>" }, { status: 400 });
+      base = `http://${to}`;
+    }
+    // One curl per iteration (new connection each time, matching a fresh outbound call). Fields: code, dns, connect, ttfb, total (ms).
+    const script = `for i in $(seq 1 ${n}); do curl -s -o /dev/null -m 60 -w '%{http_code} %{time_namelookup} %{time_connect} %{time_starttransfer} %{time_total}\\n'${extra} "${base}${p}" || echo "000 0 0 0 0"; done`;
+    const r = await exec(from, script);
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    const rows = r.out.split("\n").map((l) => l.trim().split(" ")).filter((c) => c.length === 5);
+    const col = (i: number) => rows.map((c) => Math.round(Number(c[i]) * 1000));
+    const errors = rows.filter((c) => !/^[23]/.test(c[0])).length;
+    return Response.json({
+      from, url: `${base}${p}`, n: rows.length, errors, errorRate: rows.length ? errors / rows.length : null,
+      ms: { dns: summarize(col(1)), connect: summarize(col(2)), ttfb: summarize(col(3)), total: summarize(col(4)) },
+      note: "first sample may include cold start; discard it or warm up first",
+    });
+  }
+
+  if (path === "/_internal/diag/tcp") {
+    const host = url.searchParams.get("host") ?? "";
+    const port = clampInt(url.searchParams.get("port"), 0, 1, 65535);
+    if (!SAFE_HOST.test(host) || !port) return Response.json({ error: "host and port required" }, { status: 400 });
+    const script = `for i in $(seq 1 ${n}); do s=$(date +%s%N); (exec 3<>/dev/tcp/${host}/${port}) 2>/dev/null && r=ok || r=fail; e=$(date +%s%N); echo "$r $(( (e - s) / 1000000 ))"; done`;
+    const r = await exec(from, script);
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    const rows = r.out.split("\n").map((l) => l.trim().split(" "));
+    return Response.json({
+      from, host, port, errors: rows.filter((c) => c[0] !== "ok").length,
+      connectMs: summarize(rows.filter((c) => c[0] === "ok").map((c) => Number(c[1]))),
+      note: "TCP connect only (includes DNS). For S3 this is network RTT; HTTPS/API time is measured with /diag/curl target=<bucket host>.",
+    });
+  }
+
+  return new Response("Not found", { status: 404 });
+}
+
+// ---- Static asset caching (Workers Caching) -------------------------------------------------------------
+// The default export is the gateway (caching disabled in wrangler.jsonc, it runs on every request). Only requests that
+// pass staticCacheEligible() are forwarded, stripped of Cookie/Authorization, to the StaticAssets entrypoint, which has
+// caching enabled. Everything else (tenant content under /bi/site, APIs, UMS, logins) never reaches the cache.
+const STATIC_PREFIXES = ["/bi/cdn/", "/bi/designer/cultures/"];
+const STATIC_EXACT = ["/bi/js/localizationcontent.js"];
+const STATIC_TYPE = /^(text\/css|(text|application)\/javascript|image\/|font\/|application\/(font|x-font)[-\w.]*|application\/vnd\.ms-fontobject)/i;
+
+export function staticCacheEligible(request: Request, env: MultiEnv): boolean {
+  if (env.STATIC_CACHE !== "true") return false;
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  if (request.headers.has("Range") || request.headers.has("Upgrade")) return false;
+  const p = new URL(request.url).pathname;
+  if (p.includes("//") || p.includes("..") || p.includes("%")) return false;
+  return STATIC_EXACT.includes(p) || STATIC_PREFIXES.some((x) => p.startsWith(x) && p.length > x.length);
+}
+
+export function staticCacheTtl(url: URL, env: MultiEnv): number {
+  const v = url.searchParams.get("v") ?? url.searchParams.get("version");
+  if (url.pathname === "/bi/js/localizationcontent.js") return 600;
+  if (v) return /^\d+(\.\d+)+$/.test(v) ? 86400 : 2592000; // release number: 1 day; content hash: 30 days
+  const n = Number(env.STATIC_CACHE_UNVERSIONED_TTL ?? 3600);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 86400) : 0;
+}
+
+// Decides what the cache may keep. Anything doubtful becomes no-store.
+export function applyStaticCachePolicy(response: Response, url: URL, env: MultiEnv): Response {
+  const out = new Response(response.body, response);
+  const ttl = staticCacheTtl(url, env);
+  const ok = response.status === 200 && ttl > 0 && !response.headers.has("Set-Cookie") &&
+    STATIC_TYPE.test(response.headers.get("Content-Type") ?? "") && !/\*/.test(response.headers.get("Vary") ?? "");
+  if (ok) {
+    const immutable = ttl >= 2592000 ? ", immutable" : "";
+    out.headers.set("Cache-Control", `public, max-age=${ttl}${immutable}`);
+    out.headers.set("Cache-Tag", "static");
+  } else {
+    out.headers.set("Cache-Control", "no-store");
+  }
+  return out;
+}
+
+export class StaticAssets extends WorkerEntrypoint<MultiEnv> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const host = url.pathname.startsWith("/bi/designer/") ? "bi-designer" : "bi-web";
+    const response = await serviceStub(this.env, host)!.fetch(request);
+    return applyStaticCachePolicy(response, url, this.env);
+  }
+}
+
 const HEALTH_PATHS = new Set(["/health-check", "/api/health-check", "/ums/health-check"]);
 const HEALTH_TTL_MS = 5000;
 const healthCache = new Map<string, { at: number; status: number; body: string }>();
 
 export default {
-  async fetch(request: Request, env: MultiEnv): Promise<Response> {
+  async fetch(request: Request, env: MultiEnv, ctx?: { exports?: Record<string, { fetch(r: Request): Promise<Response> }> }): Promise<Response> {
     const startedAt = Date.now();
     const publicUrl = new URL(request.url);
     lastPublicBase = publicUrl.origin;
@@ -352,6 +616,12 @@ export default {
       return Response.json({ from, results });
     }
 
+    // DIAGNOSTICS (admin only, read-only). See multi/DIAGNOSTICS.md.
+    if (path.startsWith("/_internal/diag/")) {
+      if (!env.ADMIN_TOKEN || request.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) return new Response("Forbidden", { status: 403 });
+      return handleDiag(path, publicUrl, env, (request as Request & { cf?: { colo?: string } }).cf?.colo);
+    }
+
     const cacheable = request.method === "GET" && HEALTH_PATHS.has(path);
     if (cacheable) {
       const hit = healthCache.get(path);
@@ -366,6 +636,14 @@ export default {
 
     const forwardRequest = new Request(request, { headers });
 
+    if (staticCacheEligible(request, env) && ctx?.exports?.StaticAssets) {
+      const clean = new Headers(headers);
+      clean.delete("Cookie");
+      clean.delete("Authorization");
+      const cached = await ctx.exports.StaticAssets.fetch(new Request(request, { headers: clean }));
+      return withTiming(secureApplicationResponse(cached, publicUrl), `worker-total;dur=${Date.now() - startedAt}`);
+    }
+
     // Path-based routing matching Syncfusion multi-container default.conf. Longest prefix first.
     const under = (p: string) => path === p || path.startsWith(p + "/");
     let targetResponse: Response;
@@ -374,25 +652,25 @@ export default {
       // Vendor nginx: location /etlservice/ { proxy_pass http://bi-etl/; } strips the prefix.
       const target = new URL(request.url);
       target.pathname = path.slice("/etlservice".length) || "/";
-      targetResponse = await env.BI_ETL_CONTAINER.getByName("bi-etl").fetch(new Request(target, forwardRequest));
+      targetResponse = await serviceStub(env, "bi-etl")!.fetch(new Request(target, forwardRequest));
     } else if (under("/aiservice")) {
-      targetResponse = await env.BOLD_AI_CONTAINER.getByName("bold-ai").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bold-ai")!.fetch(forwardRequest);
     } else if (under("/mcp")) {
-      targetResponse = await env.BOLD_MCP_CONTAINER.getByName("bold-mcp").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bold-mcp")!.fetch(forwardRequest);
     } else if (under("/bi/api")) {
-      targetResponse = await env.BI_API_CONTAINER.getByName("bi-api").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bi-api")!.fetch(forwardRequest);
     } else if (under("/bi/jobs")) {
-      targetResponse = await env.BI_JOBS_CONTAINER.getByName("bi-jobs").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bi-jobs")!.fetch(forwardRequest);
     } else if (under("/bi/designer")) {
-      targetResponse = await env.BI_DESIGNER_CONTAINER.getByName("bi-designer").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bi-designer")!.fetch(forwardRequest);
     } else if (under("/bi")) {
-      targetResponse = await env.BI_WEB_CONTAINER.getByName("bi-web").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "bi-web")!.fetch(forwardRequest);
     } else if (under("/api")) {
-      targetResponse = await env.ID_API_CONTAINER.getByName("id-api").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "id-api")!.fetch(forwardRequest);
     } else if (under("/ums")) {
-      targetResponse = await env.ID_UMS_CONTAINER.getByName("id-ums").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "id-ums")!.fetch(forwardRequest);
     } else {
-      targetResponse = await env.ID_WEB_CONTAINER.getByName("id-web").fetch(forwardRequest);
+      targetResponse = await serviceStub(env, "id-web")!.fetch(forwardRequest);
     }
 
     if (cacheable && targetResponse.status === 200) {

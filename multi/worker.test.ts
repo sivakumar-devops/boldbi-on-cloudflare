@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class { env: unknown; constructor(_c: unknown, env: unknown) { this.env = env; } } }));
+
 vi.mock("@cloudflare/containers", () => ({
   ContainerProxy: class {},
   Container: class {
@@ -16,7 +18,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport, locationHintFor, serviceStub, staticCacheEligible, staticCacheTtl, applyStaticCachePolicy } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -291,5 +293,149 @@ describe("multi routing tests", () => {
     expect(connect).toHaveBeenCalledTimes(1);
     expect(connect).toHaveBeenCalledWith("ping:80");
     expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("performance diagnostics", () => {
+  it("percentile uses nearest-rank", () => {
+    const v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    expect(percentile(v, 50)).toBe(5);
+    expect(percentile(v, 95)).toBe(10);
+    expect(percentile([], 50)).toBeNull();
+  });
+
+  it("forwardInternal adds no timing and records nothing unless DIAG_ENABLED=true", async () => {
+    const { env } = setup();
+    const res = await forwardInternal(new Request("http://id-api/api/x"), env);
+    expect(res.headers.get("Server-Timing")).toBeNull();
+    expect(internalStatsReport()["id-api"]).toBeUndefined();
+  });
+
+  it("forwardInternal records stats and Server-Timing when DIAG_ENABLED=true", async () => {
+    const { env } = setup();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const res = await forwardInternal(new Request("http://bi-api/bi/api/x"), { ...env, DIAG_ENABLED: "true" });
+    expect(res.headers.get("Server-Timing")).toContain("internal-forward");
+    expect(internalStatsReport()["bi-api"].total.n).toBe(1);
+    expect(JSON.parse(log.mock.calls[0][0] as string)).toMatchObject({ diag: "internal", host: "bi-api", status: 200 });
+    log.mockRestore();
+  });
+
+  it("diag endpoints require the admin token and validate input", async () => {
+    const { env } = setup();
+    const call = (path: string, token?: string) =>
+      worker.fetch(new Request("https://app.example" + path, { headers: token ? { "X-Admin-Token": token } : {} }), { ...env, ADMIN_TOKEN: "secret" });
+    expect((await call("/_internal/diag/stats")).status).toBe(403);
+    expect((await call("/_internal/diag/stats", "wrong")).status).toBe(403);
+    expect((await call("/_internal/diag/stats", "secret")).status).toBe(200);
+    expect((await call("/_internal/diag/curl?from=bad", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/curl?from=id-web&to=id-api&path=/a;rm", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/tcp?from=id-web&host=a;b&port=5432", "secret")).status).toBe(400);
+    expect((await worker.fetch(new Request("https://app.example/_internal/diag/stats"), env)).status).toBe(403);
+  });
+});
+
+describe("diag curl local mode", () => {
+  it("calls loopback inside the container with forwarded headers, not the internal host", async () => {
+    const { env } = setup();
+    const diagExec = vi.fn(async (_s: string) => ({ ok: true, out: "200 0.001 0.001 0.002 0.003" }));
+    const e = { ...env, ADMIN_TOKEN: "secret", ID_API_CONTAINER: { getByName: vi.fn(() => ({ diagExec })) } as never };
+    const res = await worker.fetch(new Request("https://app.example/_internal/diag/curl?from=id-api&local=1&path=/api/health-check&n=1", { headers: { "X-Admin-Token": "secret" } }), e);
+    expect(res.status).toBe(200);
+    const script = diagExec.mock.calls[0][0];
+    expect(script).toContain("http://127.0.0.1:80/api/health-check");
+    expect(script).toContain("X-Forwarded-Host: app.example");
+    expect(script).not.toContain("http://id-api");
+  });
+});
+
+describe("Durable Object placement", () => {
+  it("defaults to enam, accepts valid hints, falls back to apac on junk, and none disables", () => {
+    expect(locationHintFor({})).toBe("enam");
+    expect(locationHintFor({ DO_LOCATION_HINT: "APAC-SE" })).toBe("apac-se");
+    expect(locationHintFor({ DO_LOCATION_HINT: "apac" })).toBe("apac");
+    expect(locationHintFor({ DO_LOCATION_HINT: "mars" })).toBe("enam");
+    expect(locationHintFor({ DO_LOCATION_HINT: "none" })).toBeUndefined();
+  });
+
+  it("passes the same hint for every service, public and internal", async () => {
+    const { env, fetch } = setup();
+    for (const p of ["/", "/api/x", "/ums/x", "/bi", "/bi/api/x", "/bi/jobs/x", "/bi/designer", "/etlservice/x", "/aiservice/x", "/mcp"]) await fetch(p);
+    await forwardInternal(new Request("http://id-api/api/x"), env);
+    const all = [env.ID_WEB_CONTAINER, env.ID_API_CONTAINER, env.ID_UMS_CONTAINER, env.BI_WEB_CONTAINER, env.BI_API_CONTAINER,
+      env.BI_JOBS_CONTAINER, env.BI_DESIGNER_CONTAINER, env.BI_ETL_CONTAINER, env.BOLD_AI_CONTAINER, env.BOLD_MCP_CONTAINER];
+    for (const ns of all) {
+      const calls = (ns.getByName as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      for (const c of calls) expect(c[1]).toEqual({ locationHint: "enam" });
+    }
+  });
+
+  it("DO_NAME_SUFFIX renames objects consistently; unknown hosts return undefined", () => {
+    const { env } = setup();
+    serviceStub({ ...env, DO_NAME_SUFFIX: "v2", DO_LOCATION_HINT: "none" }, "bi-web");
+    expect((env.BI_WEB_CONTAINER.getByName as unknown as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(["bi-web-v2", undefined]);
+    expect(serviceStub(env, "nope")).toBeUndefined();
+  });
+});
+
+describe("wrangler placement config", () => {
+  it("constrains all 10 containers to ENAM and keeps one instance each", () => {
+    const cfg = JSON.parse(readFileSync("wrangler.jsonc", "utf8"));
+    expect(cfg.containers).toHaveLength(10);
+    for (const c of cfg.containers) {
+      expect(c.constraints).toEqual({ regions: ["ENAM"] });
+      expect(c.max_instances).toBe(1);
+    }
+  });
+});
+
+describe("static asset caching", () => {
+  const on = (o: Partial<MultiEnv> = {}) => ({ STATIC_CACHE: "true", ...o }) as MultiEnv;
+  const req = (p: string, init?: RequestInit) => new Request("https://app.example" + p, init);
+
+  it("is off unless STATIC_CACHE=true", () => {
+    expect(staticCacheEligible(req("/bi/cdn/scripts/a.js?v=x"), {} as MultiEnv)).toBe(false);
+  });
+  it("allows only listed static GET/HEAD paths", () => {
+    for (const p of ["/bi/cdn/scripts/a.min.js?v=abc", "/bi/designer/cultures/x.js?version=17.1.30", "/bi/js/localizationcontent.js?v=17.1.30&c=en-US"])
+      expect(staticCacheEligible(req(p), on())).toBe(true);
+    for (const p of ["/bi/site/site1/content/images/favicon.ico", "/bi/api/x", "/ums/a.js", "/bi/cdn/", "/bi//cdn/a.js", "/bi/cdn/../site/x", "/api/health-check", "/"])
+      expect(staticCacheEligible(req(p), on())).toBe(false);
+    expect(staticCacheEligible(req("/bi/cdn/a.js", { method: "POST" }), on())).toBe(false);
+    expect(staticCacheEligible(req("/bi/cdn/a.js", { headers: { Range: "bytes=0-1" } }), on())).toBe(false);
+  });
+  it("sets TTL by version type", () => {
+    expect(staticCacheTtl(new URL("https://a/bi/cdn/a.js?v=Ser7ThB3"), on())).toBe(2592000);
+    expect(staticCacheTtl(new URL("https://a/bi/cdn/a.js?version=17.1.30"), on())).toBe(86400);
+    expect(staticCacheTtl(new URL("https://a/bi/cdn/a.woff"), on())).toBe(3600);
+    expect(staticCacheTtl(new URL("https://a/bi/cdn/a.woff"), on({ STATIC_CACHE_UNVERSIONED_TTL: "0" }))).toBe(0);
+  });
+  it("caches only clean 200 static responses", () => {
+    const u = new URL("https://a/bi/cdn/a.js?v=abc");
+    const good = applyStaticCachePolicy(new Response("x", { headers: { "Content-Type": "text/javascript" } }), u, on());
+    expect(good.headers.get("Cache-Control")).toContain("public, max-age=2592000");
+    const bad = [
+      new Response("x", { status: 500, headers: { "Content-Type": "text/javascript" } }),
+      new Response("x", { status: 302, headers: { "Content-Type": "text/javascript" } }),
+      new Response("x", { headers: { "Content-Type": "text/html" } }),
+      new Response("x", { headers: { "Content-Type": "text/javascript", "Set-Cookie": "a=b" } }),
+      new Response("x", { headers: { "Content-Type": "text/javascript", Vary: "*" } }),
+    ];
+    for (const r of bad) expect(applyStaticCachePolicy(r, u, on()).headers.get("Cache-Control")).toBe("no-store");
+  });
+  it("gateway strips Cookie/Authorization before the cached entrypoint, and leaves other paths alone", async () => {
+    const { env, biWebFetch } = setup();
+    const seen: Request[] = [];
+    const ctx = { exports: { StaticAssets: { fetch: async (r: Request) => (seen.push(r), new Response("js", { headers: { "Content-Type": "text/javascript" } })) } } };
+    const e = { ...env, STATIC_CACHE: "true" } as MultiEnv;
+    const h = { Cookie: "s=1", Authorization: "Bearer t" };
+    await worker.fetch(new Request("https://app.example/bi/cdn/scripts/a.js?v=abc", { headers: h }), e, ctx);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].headers.get("Cookie")).toBeNull();
+    expect(seen[0].headers.get("Authorization")).toBeNull();
+    await worker.fetch(new Request("https://app.example/bi/site/site1/x.ico", { headers: h }), e, ctx);
+    expect(seen).toHaveLength(1);
+    expect(biWebFetch).toHaveBeenCalledTimes(1);
   });
 });

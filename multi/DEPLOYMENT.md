@@ -1,160 +1,257 @@
-# Bold BI Multi-Container Deployment (Cloudflare Containers)
+# Bold BI Multi-Container on Cloudflare Workers
 
-Deploys Bold BI microservices as separate Cloudflare Containers behind a single Worker (`boldbi-multi`).
+Runs Bold BI v17.1.30 as **10 separate microservice containers** orchestrated by a single Cloudflare Worker using Durable Objects and Cloudflare Containers (`@cloudflare/containers`). Shared application state is persisted in AWS S3 and an external PostgreSQL database.
 
-## Architecture Overview
+## Architecture
 
-In this deployment, Bold BI is decomposed into distinct microservices:
+| Service Key | Container Class | Public Path / Route | Upstream Port |
+|---|---|---|---|
+| `id-web` | `IdWebContainer` | `/`, `/accounts/*` (Identity web UI) | 80 |
+| `id-api` | `IdApiContainer` | `/api/*` (Identity REST API) | 80 |
+| `id-ums` | `IdUmsContainer` | `/ums/*` (User Management Server) | 80 |
+| `bi-web` | `BiWebContainer` | `/bi/*` (Dashboard server UI) | 80 |
+| `bi-api` | `BiApiContainer` | `/bi/api/*` (Dashboard API) | 80 |
+| `bi-jobs` | `BiJobsContainer` | Background worker (data sync, schedules) | 80 |
+| `bi-designer` | `BiDesignerContainer` | `/bi/designer/*` (Dashboard designer) | 80 |
+| `bi-etl` | `BiEtlContainer` | `/etlservice/*` (ETL engine) | 80 |
+| `bold-ai` | `BoldAiContainer` | `/aiservice/*` (AI engine) | 8080 |
+| `bold-mcp` | `BoldMcpContainer` | `/mcp/*` (Model Context Protocol) | 80 |
 
-```text
-                                  ┌───► IdWebContainer (syncfusion/bold-identity:17.1.30)
-                                  │     Port 80: / (IDP Web Portal)
-                                  │
-Browser / API  ──► Cloudflare  ───┼───► IdApiContainer (syncfusion/bold-identity-api:17.1.30)
-                  Worker Edge     │     Port 80: /api (IDP REST API)
-                  (Routing & TLS) │
-                                  └───► IdUmsContainer (syncfusion/bold-ums:17.1.30)
-                                        Port 80: /ums (Tenant & User Management)
-```
+- **Regional Placement:** All 10 containers are pinned to US East (`ENAM`) via `constraints.regions: ["ENAM"]`. Durable Objects use location hint `DO_LOCATION_HINT=enam`.
+- **Inter-service routing:** Containers communicate internally through `@cloudflare/containers` `outboundByHost` interception handled by `forwardInternal()`. Traffic never leaves Cloudflare's network.
+- **Edge Static Caching:** Optional Cloudflare Workers Caching for `/bi/cdn/*`, `/bi/designer/cultures/*`, and localization JS assets via a dedicated `StaticAssets` WorkerEntrypoint (`STATIC_CACHE=true`).
 
-Phase 1 adds the Bold BI core services (images from the vendor's multi-container compose file):
-`/bi` -> bi-web (`boldbi-server`), `/bi/api` -> bi-api (`boldbi-server-api`),
-`/bi/jobs` -> bi-jobs (`boldbi-server-jobs`), `/bi/designer` (+ `/helper`) -> bi-designer (`boldbi-designer`).
-ETL (`/etlservice`, prefix stripped), AI (`/aiservice`, port 8080) and MCP (`/mcp`) each run in their own container, as in the vendor nginx config.
-
-### Path Routing Map
-
-The Worker handles path-based routing matching Syncfusion's Nginx configuration:
-- `/`, `/login`, `/health-check` ──► `id-web`
-- `/api`, `/api/*` ──► `id-api`
-- `/ums`, `/ums/*` ──► `id-ums`
+---
 
 ## 1. Prerequisites
 
-- Node.js 22+ (no local Docker build is needed; `wrangler deploy` references the public vendor images on Docker Hub)
-- Cloudflare CLI logged in via `npx wrangler login` or `CLOUDFLARE_API_TOKEN`
+1. Cloudflare account with **Workers Paid** and **Containers** enabled.
+2. Node.js 22+ and npm on your local workstation.
+3. AWS S3 bucket in `us-east-1` (or matching US East region) for persistent `app_data`.
+4. PostgreSQL instance located in **US East** (e.g. Azure Database for PostgreSQL in East US / East US 2).
+5. (Optional) Custom domain active in the same Cloudflare account (e.g. `synctester.com`).
+
+---
+
+## 2. Configuration (`wrangler.jsonc`)
+
+Review `multi/wrangler.jsonc` before deployment:
+
+1. Verify `account_id` matches your Cloudflare Account ID:
+   ```jsonc
+   "account_id": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
+   "name": "ticket287457" // or your preferred worker name
+   ```
+2. Verify all 10 container definitions contain the regional constraint:
+   ```jsonc
+   "constraints": { "regions": ["ENAM"] }
+   ```
+3. Verify Workers Caching configuration is present:
+   ```jsonc
+   "cache": { "enabled": true },
+   "exports": {
+     "default": { "type": "worker", "cache": { "enabled": false } },
+     "StaticAssets": { "type": "worker", "cache": { "enabled": true } },
+     ...
+   }
+   ```
+
+---
+
+## 3. Configure Secrets
+
+Set required secrets using `npx wrangler secret put <NAME>` from the `multi/` folder:
+
+### A. Persistent S3 Storage (Required)
+Bold BI containers run stateless. Persistent storage is offloaded to S3 (`storageType: 3`):
 
 ```powershell
-Set-Location multi
+npx wrangler secret put BOLD_SERVICES_AMAZON_BUCKET_NAME
+npx wrangler secret put BOLD_SERVICES_AMAZON_ROOTFOLDER_NAME
+npx wrangler secret put BOLD_SERVICES_AWS_REGION              # e.g. us-east-1
+npx wrangler secret put BOLD_SERVICES_AWS_ACCESS_KEY_ID
+npx wrangler secret put BOLD_SERVICES_AWS_SECRET_ACCESS_KEY
+```
+
+### B. Base URL & Admin Token (Required)
+```powershell
+# Set to your primary ingress URL (no trailing slash)
+npx wrangler secret put APP_BASE_URL        # e.g. https://poc-cloudflare-bi.synctester.com or https://<worker>.<subdomain>.workers.dev
+
+# Administrative secret for /_internal/restart and /_internal/diag/* endpoints
+npx wrangler secret put ADMIN_TOKEN         # Use a long random string
+```
+
+### C. Placement Hints & Performance (Recommended)
+```powershell
+npx wrangler secret put DO_LOCATION_HINT    # enam
+npx wrangler secret put DO_NAME_SUFFIX      # e.g. us1 or use3 (fresh suffix forces DO creation in hint region)
+npx wrangler secret put STATIC_CACHE        # true (enables Workers Caching for CDN assets)
+```
+
+> **Note on Database Secrets:** Do NOT configure database host or passwords as Wrangler secrets. Database connection details are configured once via the UMS startup UI (`/ums/startup`) and saved into S3 and PostgreSQL directly.
+
+---
+
+## 4. Deployment
+
+### A. Install Dependencies
+```powershell
 npm install
 ```
 
-Set your `account_id` in `multi/wrangler.jsonc` (run `npx wrangler whoami` to find it).
+### B. Validate Configuration (Dry Run)
+```powershell
+npx wrangler deploy --dry-run
+```
+Ensure all 10 containers and Durable Object bindings are listed without errors.
 
-## 2. Deploy
-
-Deploys the Worker and the Bold BI service containers (vendor images, `syncfusion/*:17.1.30`):
-
+### C. Full Deployment Rollout
+Run full deployment to register containers and the Worker:
 ```powershell
 npm run deploy
 ```
 
-Check the status of your containers:
+> **Important:** Always use `npm run deploy` when updating container settings or `wrangler.jsonc`. Use `npm run deploy:worker` (`--containers-rollout=none`) only for Worker code changes that do not modify container definitions.
+
+---
+
+## 5. Custom Domain Mapping (Optional)
+
+If mapping a custom domain (e.g. `poc-cloudflare-bi.synctester.com`):
+
+1. **Prerequisite:** The apex domain (e.g. `synctester.com`) must be an active zone in the **same Cloudflare account** as your Worker.
+2. Open Cloudflare Dashboard > **Workers & Pages** > your Worker > **Settings** > **Domains & Routes**.
+3. Click **Add** > **Custom Domain** and enter `poc-cloudflare-bi.synctester.com`.
+4. Cloudflare automatically issues Universal SSL certificates and manages DNS.
+5. In Cloudflare Dashboard > **SSL/TLS**:
+   - Set encryption mode to **Full (strict)**.
+   - Enable **Always Use HTTPS**.
+6. Update `APP_BASE_URL` secret to match the domain:
+   ```powershell
+   npx wrangler secret put APP_BASE_URL # https://poc-cloudflare-bi.synctester.com
+   ```
+7. Restart all containers so they inherit the new base URL (see Section 7).
+
+---
+
+## 6. Cold Warm-Up & Initial Setup
+
+Because containers initialize lazily on first access, warm them up before initial configuration:
 
 ```powershell
+$b = "https://poc-cloudflare-bi.synctester.com" # or your workers.dev URL
+
+$paths = "/health-check","/api/health-check","/ums/health-check","/bi/health-check","/bi/api/health-check","/bi/jobs/health-check","/bi/designer/health-check","/etlservice/health-check","/aiservice/health-check","/mcp"
+
+foreach ($p in $paths) {
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $code = curl.exe -s -o NUL -w "%{http_code}" -m 240 "$b$p"
+  "{0,-30} {1}  {2} ms" -f $p, $code, $sw.ElapsedMilliseconds
+}
+```
+*Run this loop twice.* The first pass starts all containers; the second pass should return 200 HTTP codes.
+
+### Completing the Startup Wizard:
+1. Open `https://<your-host>/ums/startup` in your browser.
+2. Enter your database connection details:
+   | Field | Recommended Value |
+   |---|---|
+   | Database Type | PostgreSQL |
+   | Server Name | your US East database hostname (e.g. `*.postgres.database.azure.com`) |
+   | Port | `5432` |
+   | Maintenance Database | `postgres` |
+   | Username / Password | Database admin credentials |
+   | Database Name | `bold_services` (or new database name) |
+   | Enable SSL | Checked (if required by cloud provider) |
+3. Complete license registration and administrator account setup.
+
+---
+
+## 7. Operational Management & Diagnostics
+
+### A. Restarting Containers
+Wrangler deployments do not restart running containers if container images have not changed. Use the administrative restart endpoint:
+
+```powershell
+$h = @{ "X-Admin-Token" = "<your-ADMIN_TOKEN>" }
+
+# Restart all 10 containers
+Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=all" | ConvertTo-Json
+
+# Verify instances are terminated (LIVE INSTANCES = 0)
 npx wrangler containers list
 ```
 
-To see individual live instance status:
-```powershell
-npx wrangler containers instances <ContainerID>
-```
-
-## 3. Verify Routing
-
-Once deployed, query the health diagnostic:
-```powershell
-Invoke-RestMethod "https://<your-worker>.<subdomain>.workers.dev/_internal/health"
-```
-Expect:
-```json
-{
-  "ok": true,
-  "mode": "multi-container-spike",
-  "services": ["id-web", "id-api", "id-ums", "..."]
-}
-```
-
-Then open `https://<your-worker>.<subdomain>.workers.dev/ums/startup` in your browser.
-
-
-## Secrets for Bold BI (phase 1)
-
-Services share no disk on Cloudflare, so the vendor's S3 mode is used (`BOLD_SERVICES_STORAGETYPE=3`,
-`BOLD_SERVICES_PV_USED=false`). Set these with `npx wrangler secret put <NAME>` (never commit them):
-
-| Name | Purpose |
-|---|---|
-| `BOLD_SERVICES_AMAZON_BUCKET_NAME`, `BOLD_SERVICES_AMAZON_ROOTFOLDER_NAME`, `BOLD_SERVICES_AWS_REGION` | S3 location |
-| `BOLD_SERVICES_AWS_ACCESS_KEY_ID`, `BOLD_SERVICES_AWS_SECRET_ACCESS_KEY` | S3 credentials |
-
-Database settings are not stored as secrets: enter them manually on the UMS startup page (`/ums/startup`).
-
-How service URLs work: each container is started with an entrypoint override (`SERVICE_ENTRYPOINT` in `worker.ts`) that writes
-`local_service_url.json` with the public URLs before running the vendor `entrypoint.sh`. This replaces the former custom Dockerfiles.
-
-## Service-to-service communication (`SERVICE_COMMUNICATION`)
-
-Bold BI services find each other through `local_service_url.json`. The Worker writes it when each container starts
-(an entrypoint override, then the vendor `entrypoint.sh`, which keeps an existing file).
-
-| `SERVICE_COMMUNICATION` | Result |
-|---|---|
-| unset or `internal` (**default**) | **All 19 keys** use internal hosts, e.g. `IdpApi=http://id-api/api`, `BiApi=http://bi-api/bi/api`, `Etl=http://bi-etl`, `Ai=http://bold-ai/aiservice`, `Mcp=http://bold-mcp/mcp` |
-| `public_url` | All 19 keys use the public URL, e.g. `IdpApi=https://<worker>/api` |
-
-`INTERNAL_SERVICE_KEYS` (optional, comma separated, e.g. `IdpApi,BiApi`) limits internal mode to the listed keys and keeps the rest
-public. It is for troubleshooting only, is empty by default, and is ignored in `public_url` mode.
-
-Set with `npx wrangler secret put SERVICE_COMMUNICATION` (or `vars` in `wrangler.jsonc`). The file is written at container start,
-so restart the containers after changing it:
-`Invoke-RestMethod -Method Post -Headers @{ "X-Admin-Token" = "<token>" } "$b/_internal/restart?host=all"` (needs the `ADMIN_TOKEN` secret).
-
-### How internal calls work on Cloudflare
-
-Cloudflare containers have no shared network, so Docker hostnames do not resolve. Each container class sets `outboundByHost` for
-`id-web, id-api, id-ums, bi-web, bi-api, bi-jobs, bi-designer, bi-etl, bold-ai, bold-mcp` (`@cloudflare/containers`, and the Worker
-exports `ContainerProxy`). When a container calls `http://id-api/...`, the platform hands the request to the Worker, which forwards it
-to that service's Durable Object and container (`forwardInternal`). The call never leaves Cloudflare and skips DNS, TLS and the public edge.
-`X-Forwarded-Host` and `X-Forwarded-Proto` carry the public values, so the app still resolves the tenant by the public hostname.
-The target port is the service's own (80, or 8080 for `bold-ai`).
-
-### Browser-facing URLs
-
-The vendor writes this file for containers only: in its Docker, ECS and Kubernetes modes every key is a cluster-internal address
-(`http://id-web-service:6000`, ...), so no key is a browser URL. Browser URLs come from `APP_BASE_URL` (also used for `product.json`) and the
-tenant domain, and these stay public in every mode. I confirmed this from the vendor `entrypoint.sh`, not from the compiled application,
-so a key that the application hands to the browser would break in internal mode. Use `INTERNAL_SERVICE_KEYS` or `public_url` to isolate it.
-
-### Limitations
-
-- Interception is HTTP only (`http://` URLs). WebSocket/SignalR traffic over an intercepted host (Blazor for ETL, designer) is untested.
-- The `Reports*` keys point at hosts with no container in this deployment; they are written for completeness and are unreachable.
-- Calls to the database, S3 and other external hosts are unchanged (they leave the container directly).
-- Internal hops still pass through the Worker and a Durable Object, so latency is lower than the public path, not Docker-network speed.
-- Containers run in a Cloudflare location of Cloudflare's choosing (NRT in the logs), so database/S3 distance is unaffected by this setting.
-
-Timing: every proxied response carries a `Server-Timing` header (`container-start`, `container-app`, `worker-total`).
-
-## Temporary diagnostic: `/_internal/ping-internal`
-
-Runs a request *inside* a running container against the internal hostnames (through the outbound interception) and returns status and time:
+### B. Placement & Region Verification
+Inspect where containers and Durable Objects are physically executing:
 
 ```powershell
-Invoke-RestMethod "$b/_internal/ping-internal?from=id-ums&to=id-api,bi-api,bi-jobs" | ConvertTo-Json -Depth 5
+# Egress colocation for all containers (should show IAD or MIA):
+Invoke-RestMethod -Headers $h "$b/_internal/diag/trace?host=all" | ConvertTo-Json -Depth 5
+
+# Colocation of Durable Objects:
+Invoke-RestMethod -Headers $h "$b/_internal/diag/do-trace?host=all" | ConvertTo-Json -Depth 5
 ```
 
-`from` must be a running service (wake it first, e.g. `/ums/health-check`). Remove this route and `pingInternal` once verified.
-
-## Restarting containers
-
-`wrangler deploy` does **not** restart containers when only Worker code or env logic changed ("No changes to be made"). Because
-`local_service_url.json` is written when a container starts, restart them explicitly:
+### C. Network Latency Diagnostics
+Measure raw TCP connection RTT directly from inside running containers:
 
 ```powershell
-npx wrangler secret put ADMIN_TOKEN        # once; any long random value
-$h = @{ "X-Admin-Token" = "<the token>" }
-Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=all"            # all services
-Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=id-api,id-ums"  # selected services
+# Check latency from id-ums container to PostgreSQL:
+Invoke-RestMethod -Headers $h "$b/_internal/diag/tcp?from=id-ums&host=<db-host>&port=5432&n=20" | ConvertTo-Json -Depth 5
+
+# Check latency from bi-api container to S3:
+Invoke-RestMethod -Headers $h "$b/_internal/diag/tcp?from=bi-api&host=<bucket-host>&port=443&n=20" | ConvertTo-Json -Depth 5
+
+# Check container internal loopback performance:
+Invoke-RestMethod -Headers $h "$b/_internal/diag/curl?from=id-api&local=1&path=/api/health-check&n=30" | ConvertTo-Json -Depth 5
 ```
-The next request to each service starts a fresh container.
+
+### D. Static Asset Cache Verification
+Verify Cloudflare Workers Caching for CDN static assets:
+
+```powershell
+$u = "$b/bi/cdn/scripts/custom-ui.min.js?v=gJCUyutTyzx1s9fAcyW-rZN4crXv4bdE9GH2Bf0HAYk"
+1..3 | % { curl.exe -s -o NUL -D - $u | Select-String "HTTP/|cf-cache-status|cache-control" ; "---" }
+```
+Expected: First request returns `CF-Cache-Status: MISS`, subsequent requests return `CF-Cache-Status: HIT`.
+
+---
+
+## 8. Clean Reset & Reinstallation
+
+To reset Bold BI back to an unconfigured state:
+
+1. Stop all containers:
+   ```powershell
+   Invoke-RestMethod -Method Post -Headers $h "$b/_internal/restart?host=all"
+   npx wrangler containers list # Confirm all show LIVE INSTANCES 0
+   ```
+2. Clean AWS S3: Delete the `app_data` directory under your configured S3 root folder.
+3. Clean Database: Drop and recreate the `bold_services` database in PostgreSQL, or provide a fresh database name.
+4. Redeploy & warm up:
+   ```powershell
+   npm run deploy
+   ```
+5. Navigate to `https://<your-host>/ums/startup` to rerun setup.
+
+---
+
+## 9. Uninstall
+
+To permanently remove all Cloudflare resources:
+
+1. List all container applications:
+   ```powershell
+   npx wrangler containers list
+   ```
+2. Delete each container application:
+   ```powershell
+   npx wrangler containers delete <container-id>
+   ```
+3. Delete the Worker, secrets, and Durable Objects:
+   ```powershell
+   npx wrangler delete
+   ```
+4. Remove the S3 bucket data and cloud database as desired.

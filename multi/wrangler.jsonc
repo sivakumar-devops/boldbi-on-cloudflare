@@ -13,61 +13,71 @@
       "class_name": "IdWebContainer",
       "image": "docker.io/syncfusion/bold-identity:17.1.30",
       "instance_type": "standard-2",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "IdApiContainer",
       "image": "docker.io/syncfusion/bold-identity-api:17.1.30",
       "instance_type": "standard-1",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "IdUmsContainer",
       "image": "docker.io/syncfusion/bold-ums:17.1.30",
       "instance_type": "standard-2",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "BiWebContainer",
       "image": "docker.io/syncfusion/boldbi-server:17.1.30",
       "instance_type": "standard-2",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "BiApiContainer",
       "image": "docker.io/syncfusion/boldbi-server-api:17.1.30",
       "instance_type": "standard-1",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "BiJobsContainer",
       "image": "docker.io/syncfusion/boldbi-server-jobs:17.1.30",
       "instance_type": "standard-1",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "BiDesignerContainer",
       "image": "docker.io/syncfusion/boldbi-designer:17.1.30",
       "instance_type": "standard-2",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "BiEtlContainer",
       "image": "docker.io/syncfusion/bold-etl:17.1.30",
       "instance_type": "standard-2",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "BoldAiContainer",
       "image": "docker.io/syncfusion/bold-ai:17.1.30",
       "instance_type": "standard-1",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     },
     {
       "class_name": "BoldMcpContainer",
       "image": "docker.io/syncfusion/boldbi-mcp-server:17.1.30",
       "instance_type": "standard-1",
-      "max_instances": 1
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
     }
   ],
   "durable_objects": {
@@ -114,7 +124,10 @@
       }
     ]
   },
+  "cache": { "enabled": true },
   "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "StaticAssets": { "type": "worker", "cache": { "enabled": true } },
     "IdWebContainer": {
       "type": "durable-object",
       "storage": "sqlite"
