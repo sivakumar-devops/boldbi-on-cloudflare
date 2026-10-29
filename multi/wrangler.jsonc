@@ -1,0 +1,172 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "boldbi-multi",
+  "account_id": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-16",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "containers": [
+    {
+      "class_name": "IdWebContainer",
+      "image": "docker.io/syncfusion/bold-identity:17.1.30",
+      "instance_type": "standard-2",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "IdApiContainer",
+      "image": "docker.io/syncfusion/bold-identity-api:17.1.30",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "IdUmsContainer",
+      "image": "docker.io/syncfusion/bold-ums:17.1.30",
+      "instance_type": "standard-2",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "BiWebContainer",
+      "image": "docker.io/syncfusion/boldbi-server:17.1.30",
+      "instance_type": "standard-2",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "BiApiContainer",
+      "image": "docker.io/syncfusion/boldbi-server-api:17.1.30",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "BiJobsContainer",
+      "image": "docker.io/syncfusion/boldbi-server-jobs:17.1.30",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "BiDesignerContainer",
+      "image": "docker.io/syncfusion/boldbi-designer:17.1.30",
+      "instance_type": "standard-2",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "BiEtlContainer",
+      "image": "docker.io/syncfusion/bold-etl:17.1.30",
+      "instance_type": "standard-2",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "BoldAiContainer",
+      "image": "docker.io/syncfusion/bold-ai:17.1.30",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    },
+    {
+      "class_name": "BoldMcpContainer",
+      "image": "docker.io/syncfusion/boldbi-mcp-server:17.1.30",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "constraints": { "regions": ["ENAM"] }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ID_WEB_CONTAINER",
+        "class_name": "IdWebContainer"
+      },
+      {
+        "name": "ID_API_CONTAINER",
+        "class_name": "IdApiContainer"
+      },
+      {
+        "name": "ID_UMS_CONTAINER",
+        "class_name": "IdUmsContainer"
+      },
+      {
+        "name": "BI_WEB_CONTAINER",
+        "class_name": "BiWebContainer"
+      },
+      {
+        "name": "BI_API_CONTAINER",
+        "class_name": "BiApiContainer"
+      },
+      {
+        "name": "BI_JOBS_CONTAINER",
+        "class_name": "BiJobsContainer"
+      },
+      {
+        "name": "BI_DESIGNER_CONTAINER",
+        "class_name": "BiDesignerContainer"
+      },
+      {
+        "name": "BI_ETL_CONTAINER",
+        "class_name": "BiEtlContainer"
+      },
+      {
+        "name": "BOLD_AI_CONTAINER",
+        "class_name": "BoldAiContainer"
+      },
+      {
+        "name": "BOLD_MCP_CONTAINER",
+        "class_name": "BoldMcpContainer"
+      }
+    ]
+  },
+  "cache": { "enabled": true },
+  "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "StaticAssets": { "type": "worker", "cache": { "enabled": true } },
+    "IdWebContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "IdApiContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "IdUmsContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiWebContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiApiContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiJobsContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiDesignerContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BiEtlContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BoldAiContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BoldMcpContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}
