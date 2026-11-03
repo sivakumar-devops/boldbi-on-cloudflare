@@ -35,3 +35,9 @@ Health-check endpoints are cheap and bypass most app work, so also benchmark one
 - `/diag/curl` opens a new connection per request (worst case); real apps may reuse connections, so it is an upper bound for connection setup cost.
 - The curl and `/dev/tcp` probes need `bash`/`curl` in the vendor images. `curl` presence is not verified here; the code falls back only in the older ping-internal diagnostic.
 - Location hints (`locationHint: "apac-ne"`) are best effort and apply only when a Durable Object is first created. Restarting the container does not move the DO. Moving requires a new DO name/ID. Container placement follows the DO but is not guaranteed.
+
+## Reading log files inside a container
+
+`GET /_internal/diag/logs?from=bi-designer` lists `.log`/`.txt` files (newest first) under `/application`, `/var/log` and `/tmp`.
+Add `&file=<path>&lines=300` to read the end of one file, and `&grep=ERROR` to keep only lines containing that text.
+Only those three folders and `.log`/`.txt` files are allowed. It is read-only and needs the `X-Admin-Token` header.

@@ -413,6 +413,7 @@ for (const cls of [IdWebContainer, IdApiContainer, IdUmsContainer, BiWebContaine
 type DiagContainer = { diagExec(script: string): Promise<{ ok: boolean; out: string; err?: string }> };
 const SAFE_HOST = /^[A-Za-z0-9.-]{1,253}$/;
 const SAFE_PATH = /^\/[A-Za-z0-9._~\/-]{0,200}$/;
+const SAFE_LOG_FILE = /^\/(application|var\/log|tmp)\/[A-Za-z0-9._\/-]{1,200}\.(log|txt)$/;
 
 function clampInt(v: string | null, def: number, min: number, max: number): number {
   const n = Number.parseInt(v ?? "", 10);
@@ -424,6 +425,8 @@ function clampInt(v: string | null, def: number, min: number, max: number): numb
 // /_internal/diag/curl?from=bi-web&to=bi-api&path=/bi/api/health-check&n=20   timing breakdown per request, run inside "from"
 // /_internal/diag/tcp?from=bi-api&host=<db-or-s3-host>&port=5432&n=10         TCP connect time from inside the container
 // /_internal/diag/do-trace?host=all          colo of each Durable Object itself (separate from its container)
+// /_internal/diag/logs?from=bi-designer                       list log files inside the container (newest first)
+// /_internal/diag/logs?from=bi-designer&file=/application/x.log&lines=300&grep=ERROR   tail one file (optional filter)
 // /_internal/diag/resources?host=all          load average, memory, CPU count, uptime inside each container
 async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string): Promise<Response> {
   const hostsParam = url.searchParams.get("host") ?? "all";
@@ -460,6 +463,23 @@ async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string):
   const from = url.searchParams.get("from") ?? "";
   if (!OUTBOUND_HOSTS.includes(from)) return Response.json({ error: "from must be one of " + OUTBOUND_HOSTS.join(",") }, { status: 400 });
   const n = clampInt(url.searchParams.get("n"), 10, 1, 100);
+
+  if (path === "/_internal/diag/logs") {
+    const file = url.searchParams.get("file");
+    if (!file) {
+      const r = await exec(from, "find /application /var/log /tmp -type f \\( -name '*.log' -o -name '*.txt' \\) -printf '%T@ %s %p\\n' 2>/dev/null | sort -rn | head -50 | cut -d' ' -f2-");
+      if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+      return Response.json({ from, files: r.out.split("\n").filter(Boolean).map((l) => { const [size, ...f] = l.split(" "); return { size: Number(size), file: f.join(" ") }; }) });
+    }
+    if (!SAFE_LOG_FILE.test(file) || file.includes("..")) return Response.json({ error: "file must be a .log/.txt under /application, /var/log or /tmp" }, { status: 400 });
+    const lines = clampInt(url.searchParams.get("lines"), 200, 1, 2000);
+    const filter = url.searchParams.get("grep");
+    if (filter !== null && !/^[A-Za-z0-9 ._:=-]{1,80}$/.test(filter)) return Response.json({ error: "bad grep" }, { status: 400 });
+    const script = filter ? `tail -n 20000 '${file}' | grep -F -- '${filter}' | tail -n ${lines}` : `tail -n ${lines} '${file}'`;
+    const r = await exec(from, script);
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    return new Response(r.out, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  }
 
   if (path === "/_internal/diag/curl") {
     const to = url.searchParams.get("to") ?? "";

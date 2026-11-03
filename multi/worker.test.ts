@@ -331,6 +331,9 @@ describe("performance diagnostics", () => {
     expect((await call("/_internal/diag/curl?from=bad", "secret")).status).toBe(400);
     expect((await call("/_internal/diag/curl?from=id-web&to=id-api&path=/a;rm", "secret")).status).toBe(400);
     expect((await call("/_internal/diag/tcp?from=id-web&host=a;b&port=5432", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/etc/passwd", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/application/../etc/x.log", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/tmp/a.log&grep=a'b", "secret")).status).toBe(400);
     expect((await worker.fetch(new Request("https://app.example/_internal/diag/stats"), env)).status).toBe(403);
   });
 });
