@@ -182,6 +182,8 @@ export function buildServiceEntrypoint(internalKeys: string[]): string[] {
     "bash",
     "-c",
     `set -eu; base="\${APP_BASE_URL%/}"; dir=/application/app_data/configuration; mkdir -p "$dir"; chmod 777 "$dir"; ` +
+      // Images built with an SSH server (see docker/): start it in the background. No-op for the vendor images.
+      `if [ -x /usr/sbin/sshd ]; then mkdir -p /run/sshd; ssh-keygen -A >/dev/null 2>&1; /usr/sbin/sshd || echo "sshd failed to start" >&2; fi; ` +
       `printf '%s' "${json.replace(/"/g, '\\"')}" > "$dir/local_service_url.json"; exec bash entrypoint.sh`,
   ];
 }

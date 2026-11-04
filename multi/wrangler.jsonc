@@ -46,10 +46,14 @@
     },
     {
       "class_name": "BiJobsContainer",
-      "image": "docker.io/syncfusion/boldbi-server-jobs:17.1.30",
+      "image": "./docker/bi-jobs/Dockerfile",
       "instance_type": "standard-1",
       "max_instances": 1,
-      "constraints": { "regions": ["ENAM"] }
+      "constraints": { "regions": ["ENAM"] },
+      "ssh": { "enabled": true },
+      "authorized_keys": [
+        { "name": "my-key", "public_key": "REPLACE_WITH_YOUR_ssh-ed25519_PUBLIC_KEY_LINE" }
+      ]
     },
     {
       "class_name": "BiDesignerContainer",

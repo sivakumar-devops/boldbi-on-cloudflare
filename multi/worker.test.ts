@@ -173,6 +173,13 @@ describe("multi routing tests", () => {
     }
   }
 
+  it("starts sshd only when the image has it, and still ends with the vendor entrypoint", () => {
+    const script = buildServiceEntrypoint([])[2];
+    expect(script).toContain("if [ -x /usr/sbin/sshd ]");
+    expect(script.indexOf("sshd")).toBeLessThan(script.indexOf("exec bash entrypoint.sh"));
+    expect(script.endsWith("exec bash entrypoint.sh")).toBe(true);
+  });
+
   const ALL_KEYS = [
     "Idp", "IdpApi", "Ums", "Bi", "BiApi", "BiJob", "BiDesigner", "BiDesignerHelper", "Etl", "EtlBlazor",
     "Ai", "Mcp", "Reports", "ReportsApi", "ReportsJob", "ReportsService", "ReportsViewer", "ReportsAi", "ReportsMcp",
