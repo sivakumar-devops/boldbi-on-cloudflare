@@ -152,6 +152,8 @@ foreach ($p in $paths) {
 ```
 *Run this loop twice.* The first pass starts all containers; the second pass should return 200 HTTP codes.
 
+To open a shell inside a container after warm-up, see [SSH.md](SSH.md).
+
 ### Completing the Startup Wizard:
 1. Open `https://<your-host>/ums/startup` in your browser.
 2. Enter your database connection details:

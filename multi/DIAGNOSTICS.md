@@ -70,18 +70,6 @@ To check which patch version a container runs, try `ls /application` and `cat /a
 
 Every call is written to the Worker log (`"diag":"exec"` with the command), so use can be audited. Treat the admin token like a root password: anyone holding it can run commands in the containers while `EXEC_ENABLED` is `true`.
 
-## SSH into a container (Windows)
+## SSH into a container
 
-Cloudflare runs its own SSH server (Dropbear) in every container, so the vendor images need no changes. All 10 containers in `wrangler.jsonc` have `ssh.enabled` and your key in `authorized_keys`. Changing keys needs a full `npm run deploy`.
-
-1. Wake the container by opening the site (SSH never starts a stopped container).
-2. Get its application ID with `npx wrangler containers list`, then the instance ID with `npx wrangler containers instances <APP_ID>`.
-3. Connect. This form works on Windows, where `npx` cannot be launched directly and the key is not named `id_ed25519`:
-
-```powershell
-ssh -i $HOME\.ssh\cf_containers -o IdentitiesOnly=yes `
-  -o ProxyCommand="cmd /c npx wrangler containers ssh %h" `
-  cloudchamber@<INSTANCE_ID>
-```
-
-The instance ID changes whenever a container restarts or is redeployed. The shell is `/bin/sh`.
+See [SSH.md](SSH.md) for the full guide: setup, connect command for Windows, and troubleshooting.
