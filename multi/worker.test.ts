@@ -442,3 +442,39 @@ describe("static asset caching", () => {
     expect(biWebFetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("diag exec", () => {
+  it("rejects when EXEC_ENABLED is not set, or when unauthorized", async () => {
+    const { env } = setup();
+    const e = { ...env, ADMIN_TOKEN: "secret" } as MultiEnv;
+    const req = (token?: string) => new Request("https://app.example/_internal/diag/exec?from=bi-designer", {
+      method: "POST", headers: token ? { "X-Admin-Token": token } : {}, body: "ls",
+    });
+    expect((await worker.fetch(req(), e)).status).toBe(403);
+    expect((await worker.fetch(req("wrong"), e)).status).toBe(403);
+    // Even with token, disabled by default
+    expect((await worker.fetch(req("secret"), e)).status).toBe(403);
+  });
+
+  it("executes bash commands across containers when enabled and authorized", async () => {
+    const { env } = setup();
+    const diagExec = vi.fn(async (s: string) => ({ ok: true, out: `ran: ${s}` }));
+    const e = {
+      ...env,
+      ADMIN_TOKEN: "secret",
+      EXEC_ENABLED: "true",
+      BI_DESIGNER_CONTAINER: { getByName: vi.fn(() => ({ diagExec })) } as never,
+    } as MultiEnv;
+
+    const res = await worker.fetch(new Request("https://app.example/_internal/diag/exec?from=bi-designer", {
+      method: "POST",
+      headers: { "X-Admin-Token": "secret" },
+      body: "ls -la /application",
+    }), e);
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, { output?: string }>;
+    expect(body["bi-designer"].output).toContain("ls -la /application");
+    expect(diagExec).toHaveBeenCalledTimes(1);
+  });
+});

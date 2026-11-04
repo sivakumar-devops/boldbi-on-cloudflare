@@ -41,3 +41,31 @@ Health-check endpoints are cheap and bypass most app work, so also benchmark one
 `GET /_internal/diag/logs?from=bi-designer` lists `.log`/`.txt` files (newest first) under `/application`, `/var/log` and `/tmp`.
 Add `&file=<path>&lines=300` to read the end of one file, and `&grep=ERROR` to keep only lines containing that text.
 Only those three folders and `.log`/`.txt` files are allowed. It is read-only and needs the `X-Admin-Token` header.
+
+## Running commands inside the containers (no SSH)
+
+`wrangler containers ssh` does not work here, because the vendor images have no SSH server. Use the exec endpoint instead. It runs `bash -c` inside the running container, like `docker exec`.
+
+It is off by default. To turn it on:
+
+1. Set the Worker variable `EXEC_ENABLED` to `true` (with `ADMIN_TOKEN` already set), then run `npm run deploy:worker`. This does not restart the containers.
+2. Wake the containers first by opening the site. The endpoint does not start a stopped container.
+3. Turn it off again when you finish by removing `EXEC_ENABLED` and redeploying the Worker.
+
+```powershell
+$h = @{ "X-Admin-Token" = $token }
+$u = "$base/_internal/diag/exec"
+
+# One container
+Invoke-RestMethod -Method Post -Headers $h -Uri "$u`?from=bi-designer" -Body "ls -la /application"
+
+# Several containers, or all ten
+Invoke-RestMethod -Method Post -Headers $h -Uri "$u`?from=bi-api,bi-web" -Body "tail -n 50 /var/log/dpkg.log"
+Invoke-RestMethod -Method Post -Headers $h -Uri "$u`?from=all" -Body "hostname; df -h /; free -m"
+```
+
+The body is the command. Add `&timeout=120` to allow up to 300 seconds (default 60). Each result ends with `[exit=N]`. Output is capped at 200,000 characters per container.
+
+To check which patch version a container runs, try `ls /application` and `cat /application/*/version* 2>/dev/null`, or look at the image tag in `wrangler.jsonc`.
+
+Every call is written to the Worker log (`"diag":"exec"` with the command), so use can be audited. Treat the admin token like a root password: anyone holding it can run commands in the containers while `EXEC_ENABLED` is `true`.

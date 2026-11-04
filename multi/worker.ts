@@ -25,6 +25,7 @@ export interface MultiEnv {
   ADMIN_TOKEN?: string; // enables POST /_internal/restart and /_internal/diag/*
   STATIC_CACHE?: string; // "true" serves allow-listed static assets through the cached StaticAssets entrypoint (Workers Caching)
   STATIC_CACHE_UNVERSIONED_TTL?: string; // seconds for static files without a version in the URL (default 3600, 0 = do not cache)
+  EXEC_ENABLED?: string; // "true" enables POST /_internal/diag/exec (run a shell command inside containers). Leave unset when not needed.
   DIAG_ENABLED?: string; // "true" records timing for internal calls (Server-Timing header + structured console.log)
 
   // Shared file storage (AWS S3, vendor "storage type 3")
@@ -415,6 +416,31 @@ const SAFE_HOST = /^[A-Za-z0-9.-]{1,253}$/;
 const SAFE_PATH = /^\/[A-Za-z0-9._~\/-]{0,200}$/;
 const SAFE_LOG_FILE = /^\/(application|var\/log|tmp)\/[A-Za-z0-9._\/-]{1,200}\.(log|txt)$/;
 
+const EXEC_MAX_CMD = 4000;
+const EXEC_MAX_OUT = 200_000;
+
+// POST /_internal/diag/exec?from=bi-designer|all|id-web,bi-api&timeout=60   body = shell command (text/plain)
+// Runs the command with bash inside the running container(s), like `docker exec`. Needs ADMIN_TOKEN and EXEC_ENABLED=true.
+// Does not start stopped containers. Each call is logged (host + command) so use is auditable.
+export async function handleExec(request: Request, url: URL, env: MultiEnv): Promise<Response> {
+  if (env.EXEC_ENABLED !== "true") return Response.json({ error: "exec is disabled; set EXEC_ENABLED=true and redeploy the Worker" }, { status: 403 });
+  if (request.method !== "POST") return Response.json({ error: "use POST with the command as the body" }, { status: 405 });
+  const fromParam = url.searchParams.get("from") ?? "";
+  const hosts = fromParam === "all" ? OUTBOUND_HOSTS : fromParam.split(",").filter(Boolean);
+  if (!hosts.length || hosts.some((h) => !OUTBOUND_HOSTS.includes(h))) return Response.json({ error: "from must be all or a list of " + OUTBOUND_HOSTS.join(",") }, { status: 400 });
+  const cmd = (await request.text()).trim();
+  if (!cmd || cmd.length > EXEC_MAX_CMD) return Response.json({ error: `body must be a command of 1-${EXEC_MAX_CMD} characters` }, { status: 400 });
+  const timeout = clampInt(url.searchParams.get("timeout"), 60, 1, 300);
+  const quoted = `'${cmd.replace(/'/g, `'\\''`)}'`;
+  const script = `timeout ${timeout} bash -c ${quoted} 2>&1; echo "[exit=$?]"`;
+  console.log(JSON.stringify({ diag: "exec", hosts, command: cmd.slice(0, 500) }));
+  const results = await Promise.all(hosts.map(async (h) => {
+    const r = await (internalTarget(env, h) as unknown as DiagContainer).diagExec(script);
+    return [h, r.ok ? { output: r.out.slice(-EXEC_MAX_OUT) } : { error: r.err }] as const;
+  }));
+  return Response.json(Object.fromEntries(results));
+}
+
 function clampInt(v: string | null, def: number, min: number, max: number): number {
   const n = Number.parseInt(v ?? "", 10);
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
@@ -427,6 +453,7 @@ function clampInt(v: string | null, def: number, min: number, max: number): numb
 // /_internal/diag/do-trace?host=all          colo of each Durable Object itself (separate from its container)
 // /_internal/diag/logs?from=bi-designer                       list log files inside the container (newest first)
 // /_internal/diag/logs?from=bi-designer&file=/application/x.log&lines=300&grep=ERROR   tail one file (optional filter)
+// POST /_internal/diag/exec?from=all|bi-api,bi-web  body = shell command (needs EXEC_ENABLED=true)
 // /_internal/diag/resources?host=all          load average, memory, CPU count, uptime inside each container
 async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string): Promise<Response> {
   const hostsParam = url.searchParams.get("host") ?? "all";
@@ -639,6 +666,7 @@ export default {
     // DIAGNOSTICS (admin only, read-only). See multi/DIAGNOSTICS.md.
     if (path.startsWith("/_internal/diag/")) {
       if (!env.ADMIN_TOKEN || request.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) return new Response("Forbidden", { status: 403 });
+      if (path === "/_internal/diag/exec") return handleExec(request, publicUrl, env);
       return handleDiag(path, publicUrl, env, (request as Request & { cf?: { colo?: string } }).cf?.colo);
     }
 
