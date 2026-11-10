@@ -34,6 +34,13 @@ export interface MultiEnv {
   BOLD_SERVICES_AWS_REGION?: string;
   BOLD_SERVICES_AWS_ACCESS_KEY_ID?: string;
   BOLD_SERVICES_AWS_SECRET_ACCESS_KEY?: string;
+
+  // Shared file storage (Cloudflare R2, vendor "storage type 5"). Used instead of S3 when the bucket name is set.
+  BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME?: string;
 }
 
 const S3_KEYS = [
@@ -44,7 +51,15 @@ const S3_KEYS = [
   "BOLD_SERVICES_AWS_SECRET_ACCESS_KEY",
 ] as const;
 
-// Every service gets the S3 settings. Database settings are entered manually on the UMS startup page.
+const R2_KEYS = [
+  "BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID",
+  "BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME",
+] as const;
+
+// Every service gets the storage settings (R2 if configured, otherwise S3). Database settings are entered manually on the UMS startup page.
 export function buildContainerEnv(requestUrl: string, env: MultiEnv): Record<string, string> {
   const url = new URL(requestUrl);
   const vars: Record<string, string> = {
@@ -57,7 +72,10 @@ export function buildContainerEnv(requestUrl: string, env: MultiEnv): Record<str
     BOLD_SERVICES_CONSOLE_LOG_ENABLED: "true",
   };
 
-  if (env.BOLD_SERVICES_AMAZON_BUCKET_NAME) {
+  if (env.BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME) {
+    vars.BOLD_SERVICES_STORAGETYPE = "5";
+    for (const k of R2_KEYS) if (env[k]) vars[k] = env[k]!;
+  } else if (env.BOLD_SERVICES_AMAZON_BUCKET_NAME) {
     vars.BOLD_SERVICES_STORAGETYPE = "3";
     for (const k of S3_KEYS) if (env[k]) vars[k] = env[k]!;
   }

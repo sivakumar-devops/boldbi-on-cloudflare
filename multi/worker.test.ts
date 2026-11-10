@@ -140,6 +140,25 @@ describe("multi routing tests", () => {
     expect(s.biDesignerFetch).toHaveBeenCalledTimes(2);
   });
 
+  it("builds container env with R2 settings (storage type 5), preferred over S3", () => {
+    const env = {
+      BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME: "bkt",
+      BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID: "id",
+      BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY: "secret",
+      BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL: "https://acct.r2.cloudflarestorage.com",
+      BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME: "root",
+      BOLD_SERVICES_AMAZON_BUCKET_NAME: "old-s3",
+    } as MultiEnv;
+    const vars = buildContainerEnv("https://app.example/", env);
+    expect(vars).toMatchObject({
+      BOLD_SERVICES_STORAGETYPE: "5",
+      BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME: "bkt",
+      BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL: "https://acct.r2.cloudflarestorage.com",
+      BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME: "root",
+    });
+    expect(vars).not.toHaveProperty("BOLD_SERVICES_AMAZON_BUCKET_NAME");
+  });
+
   it("builds container env with S3 settings and no database settings", () => {
     const env = {
       BOLD_SERVICES_AMAZON_BUCKET_NAME: "bkt",
