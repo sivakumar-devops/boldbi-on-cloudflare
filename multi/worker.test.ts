@@ -140,6 +140,25 @@ describe("multi routing tests", () => {
     expect(s.biDesignerFetch).toHaveBeenCalledTimes(2);
   });
 
+  it("builds container env with R2 settings (storage type 5), preferred over S3", () => {
+    const env = {
+      BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME: "bkt",
+      BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID: "id",
+      BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY: "secret",
+      BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL: "https://acct.r2.cloudflarestorage.com",
+      BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME: "root",
+      BOLD_SERVICES_AMAZON_BUCKET_NAME: "old-s3",
+    } as MultiEnv;
+    const vars = buildContainerEnv("https://app.example/", env);
+    expect(vars).toMatchObject({
+      BOLD_SERVICES_STORAGETYPE: "5",
+      BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME: "bkt",
+      BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL: "https://acct.r2.cloudflarestorage.com",
+      BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME: "root",
+    });
+    expect(vars).not.toHaveProperty("BOLD_SERVICES_AMAZON_BUCKET_NAME");
+  });
+
   it("builds container env with S3 settings and no database settings", () => {
     const env = {
       BOLD_SERVICES_AMAZON_BUCKET_NAME: "bkt",
@@ -331,6 +350,9 @@ describe("performance diagnostics", () => {
     expect((await call("/_internal/diag/curl?from=bad", "secret")).status).toBe(400);
     expect((await call("/_internal/diag/curl?from=id-web&to=id-api&path=/a;rm", "secret")).status).toBe(400);
     expect((await call("/_internal/diag/tcp?from=id-web&host=a;b&port=5432", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/etc/passwd", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/application/../etc/x.log", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/tmp/a.log&grep=a'b", "secret")).status).toBe(400);
     expect((await worker.fetch(new Request("https://app.example/_internal/diag/stats"), env)).status).toBe(403);
   });
 });
@@ -437,5 +459,41 @@ describe("static asset caching", () => {
     await worker.fetch(new Request("https://app.example/bi/site/site1/x.ico", { headers: h }), e, ctx);
     expect(seen).toHaveLength(1);
     expect(biWebFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("diag exec", () => {
+  it("rejects when EXEC_ENABLED is not set, or when unauthorized", async () => {
+    const { env } = setup();
+    const e = { ...env, ADMIN_TOKEN: "secret" } as MultiEnv;
+    const req = (token?: string) => new Request("https://app.example/_internal/diag/exec?from=bi-designer", {
+      method: "POST", headers: token ? { "X-Admin-Token": token } : {}, body: "ls",
+    });
+    expect((await worker.fetch(req(), e)).status).toBe(403);
+    expect((await worker.fetch(req("wrong"), e)).status).toBe(403);
+    // Even with token, disabled by default
+    expect((await worker.fetch(req("secret"), e)).status).toBe(403);
+  });
+
+  it("executes bash commands across containers when enabled and authorized", async () => {
+    const { env } = setup();
+    const diagExec = vi.fn(async (s: string) => ({ ok: true, out: `ran: ${s}` }));
+    const e = {
+      ...env,
+      ADMIN_TOKEN: "secret",
+      EXEC_ENABLED: "true",
+      BI_DESIGNER_CONTAINER: { getByName: vi.fn(() => ({ diagExec })) } as never,
+    } as MultiEnv;
+
+    const res = await worker.fetch(new Request("https://app.example/_internal/diag/exec?from=bi-designer", {
+      method: "POST",
+      headers: { "X-Admin-Token": "secret" },
+      body: "ls -la /application",
+    }), e);
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, { output?: string }>;
+    expect(body["bi-designer"].output).toContain("ls -la /application");
+    expect(diagExec).toHaveBeenCalledTimes(1);
   });
 });

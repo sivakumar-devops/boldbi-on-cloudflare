@@ -1,6 +1,6 @@
 # Bold BI Multi-Container on Cloudflare Workers
 
-Runs Bold BI v17.1.30 as **10 separate microservice containers** orchestrated by a single Cloudflare Worker using Durable Objects and Cloudflare Containers (`@cloudflare/containers`). Shared application state is persisted in AWS S3 and an external PostgreSQL database.
+Runs Bold BI v17.1.30 as **10 separate microservice containers** orchestrated by a single Cloudflare Worker using Durable Objects and Cloudflare Containers (`@cloudflare/containers`). Shared application state is persisted in object storage (Cloudflare R2, or AWS S3) and an external PostgreSQL database. To move to R2 and private Docker Hub images, follow [MIGRATE_TO_R2.md](MIGRATE_TO_R2.md).
 
 ## Architecture
 
@@ -62,7 +62,19 @@ Review `multi/wrangler.jsonc` before deployment:
 
 Set required secrets using `npx wrangler secret put <NAME>` from the `multi/` folder:
 
-### A. Persistent S3 Storage (Required)
+### A. Persistent Storage (Required)
+
+**Cloudflare R2 (storage type 5, preferred):** set these instead of the S3 secrets. Full steps in [MIGRATE_TO_R2.md](MIGRATE_TO_R2.md).
+```powershell
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL      # https://<account-id>.r2.cloudflarestorage.com
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME
+```
+When the R2 bucket name is set it is used and the S3 settings below are ignored.
+
+**AWS S3 (storage type 3):**
 Bold BI containers run stateless. Persistent storage is offloaded to S3 (`storageType: 3`):
 
 ```powershell
@@ -151,6 +163,8 @@ foreach ($p in $paths) {
 }
 ```
 *Run this loop twice.* The first pass starts all containers; the second pass should return 200 HTTP codes.
+
+To open a shell inside a container after warm-up, see [SSH.md](SSH.md).
 
 ### Completing the Startup Wizard:
 1. Open `https://<your-host>/ums/startup` in your browser.

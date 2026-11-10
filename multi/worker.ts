@@ -25,6 +25,7 @@ export interface MultiEnv {
   ADMIN_TOKEN?: string; // enables POST /_internal/restart and /_internal/diag/*
   STATIC_CACHE?: string; // "true" serves allow-listed static assets through the cached StaticAssets entrypoint (Workers Caching)
   STATIC_CACHE_UNVERSIONED_TTL?: string; // seconds for static files without a version in the URL (default 3600, 0 = do not cache)
+  EXEC_ENABLED?: string; // "true" enables POST /_internal/diag/exec (run a shell command inside containers). Leave unset when not needed.
   DIAG_ENABLED?: string; // "true" records timing for internal calls (Server-Timing header + structured console.log)
 
   // Shared file storage (AWS S3, vendor "storage type 3")
@@ -33,6 +34,13 @@ export interface MultiEnv {
   BOLD_SERVICES_AWS_REGION?: string;
   BOLD_SERVICES_AWS_ACCESS_KEY_ID?: string;
   BOLD_SERVICES_AWS_SECRET_ACCESS_KEY?: string;
+
+  // Shared file storage (Cloudflare R2, vendor "storage type 5"). Used instead of S3 when the bucket name is set.
+  BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME?: string;
 }
 
 const S3_KEYS = [
@@ -43,7 +51,15 @@ const S3_KEYS = [
   "BOLD_SERVICES_AWS_SECRET_ACCESS_KEY",
 ] as const;
 
-// Every service gets the S3 settings. Database settings are entered manually on the UMS startup page.
+const R2_KEYS = [
+  "BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID",
+  "BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME",
+] as const;
+
+// Every service gets the storage settings (R2 if configured, otherwise S3). Database settings are entered manually on the UMS startup page.
 export function buildContainerEnv(requestUrl: string, env: MultiEnv): Record<string, string> {
   const url = new URL(requestUrl);
   const vars: Record<string, string> = {
@@ -56,7 +72,10 @@ export function buildContainerEnv(requestUrl: string, env: MultiEnv): Record<str
     BOLD_SERVICES_CONSOLE_LOG_ENABLED: "true",
   };
 
-  if (env.BOLD_SERVICES_AMAZON_BUCKET_NAME) {
+  if (env.BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME) {
+    vars.BOLD_SERVICES_STORAGETYPE = "5";
+    for (const k of R2_KEYS) if (env[k]) vars[k] = env[k]!;
+  } else if (env.BOLD_SERVICES_AMAZON_BUCKET_NAME) {
     vars.BOLD_SERVICES_STORAGETYPE = "3";
     for (const k of S3_KEYS) if (env[k]) vars[k] = env[k]!;
   }
@@ -413,6 +432,32 @@ for (const cls of [IdWebContainer, IdApiContainer, IdUmsContainer, BiWebContaine
 type DiagContainer = { diagExec(script: string): Promise<{ ok: boolean; out: string; err?: string }> };
 const SAFE_HOST = /^[A-Za-z0-9.-]{1,253}$/;
 const SAFE_PATH = /^\/[A-Za-z0-9._~\/-]{0,200}$/;
+const SAFE_LOG_FILE = /^\/(application|var\/log|tmp)\/[A-Za-z0-9._\/-]{1,200}\.(log|txt)$/;
+
+const EXEC_MAX_CMD = 4000;
+const EXEC_MAX_OUT = 200_000;
+
+// POST /_internal/diag/exec?from=bi-designer|all|id-web,bi-api&timeout=60   body = shell command (text/plain)
+// Runs the command with bash inside the running container(s), like `docker exec`. Needs ADMIN_TOKEN and EXEC_ENABLED=true.
+// Does not start stopped containers. Each call is logged (host + command) so use is auditable.
+export async function handleExec(request: Request, url: URL, env: MultiEnv): Promise<Response> {
+  if (env.EXEC_ENABLED !== "true") return Response.json({ error: "exec is disabled; set EXEC_ENABLED=true and redeploy the Worker" }, { status: 403 });
+  if (request.method !== "POST") return Response.json({ error: "use POST with the command as the body" }, { status: 405 });
+  const fromParam = url.searchParams.get("from") ?? "";
+  const hosts = fromParam === "all" ? OUTBOUND_HOSTS : fromParam.split(",").filter(Boolean);
+  if (!hosts.length || hosts.some((h) => !OUTBOUND_HOSTS.includes(h))) return Response.json({ error: "from must be all or a list of " + OUTBOUND_HOSTS.join(",") }, { status: 400 });
+  const cmd = (await request.text()).trim();
+  if (!cmd || cmd.length > EXEC_MAX_CMD) return Response.json({ error: `body must be a command of 1-${EXEC_MAX_CMD} characters` }, { status: 400 });
+  const timeout = clampInt(url.searchParams.get("timeout"), 60, 1, 300);
+  const quoted = `'${cmd.replace(/'/g, `'\\''`)}'`;
+  const script = `timeout ${timeout} bash -c ${quoted} 2>&1; echo "[exit=$?]"`;
+  console.log(JSON.stringify({ diag: "exec", hosts, command: cmd.slice(0, 500) }));
+  const results = await Promise.all(hosts.map(async (h) => {
+    const r = await (internalTarget(env, h) as unknown as DiagContainer).diagExec(script);
+    return [h, r.ok ? { output: r.out.slice(-EXEC_MAX_OUT) } : { error: r.err }] as const;
+  }));
+  return Response.json(Object.fromEntries(results));
+}
 
 function clampInt(v: string | null, def: number, min: number, max: number): number {
   const n = Number.parseInt(v ?? "", 10);
@@ -424,6 +469,9 @@ function clampInt(v: string | null, def: number, min: number, max: number): numb
 // /_internal/diag/curl?from=bi-web&to=bi-api&path=/bi/api/health-check&n=20   timing breakdown per request, run inside "from"
 // /_internal/diag/tcp?from=bi-api&host=<db-or-s3-host>&port=5432&n=10         TCP connect time from inside the container
 // /_internal/diag/do-trace?host=all          colo of each Durable Object itself (separate from its container)
+// /_internal/diag/logs?from=bi-designer                       list log files inside the container (newest first)
+// /_internal/diag/logs?from=bi-designer&file=/application/x.log&lines=300&grep=ERROR   tail one file (optional filter)
+// POST /_internal/diag/exec?from=all|bi-api,bi-web  body = shell command (needs EXEC_ENABLED=true)
 // /_internal/diag/resources?host=all          load average, memory, CPU count, uptime inside each container
 async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string): Promise<Response> {
   const hostsParam = url.searchParams.get("host") ?? "all";
@@ -460,6 +508,23 @@ async function handleDiag(path: string, url: URL, env: MultiEnv, colo?: string):
   const from = url.searchParams.get("from") ?? "";
   if (!OUTBOUND_HOSTS.includes(from)) return Response.json({ error: "from must be one of " + OUTBOUND_HOSTS.join(",") }, { status: 400 });
   const n = clampInt(url.searchParams.get("n"), 10, 1, 100);
+
+  if (path === "/_internal/diag/logs") {
+    const file = url.searchParams.get("file");
+    if (!file) {
+      const r = await exec(from, "find /application /var/log /tmp -type f \\( -name '*.log' -o -name '*.txt' \\) -printf '%T@ %s %p\\n' 2>/dev/null | sort -rn | head -50 | cut -d' ' -f2-");
+      if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+      return Response.json({ from, files: r.out.split("\n").filter(Boolean).map((l) => { const [size, ...f] = l.split(" "); return { size: Number(size), file: f.join(" ") }; }) });
+    }
+    if (!SAFE_LOG_FILE.test(file) || file.includes("..")) return Response.json({ error: "file must be a .log/.txt under /application, /var/log or /tmp" }, { status: 400 });
+    const lines = clampInt(url.searchParams.get("lines"), 200, 1, 2000);
+    const filter = url.searchParams.get("grep");
+    if (filter !== null && !/^[A-Za-z0-9 ._:=-]{1,80}$/.test(filter)) return Response.json({ error: "bad grep" }, { status: 400 });
+    const script = filter ? `tail -n 20000 '${file}' | grep -F -- '${filter}' | tail -n ${lines}` : `tail -n ${lines} '${file}'`;
+    const r = await exec(from, script);
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    return new Response(r.out, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  }
 
   if (path === "/_internal/diag/curl") {
     const to = url.searchParams.get("to") ?? "";
@@ -619,6 +684,7 @@ export default {
     // DIAGNOSTICS (admin only, read-only). See multi/DIAGNOSTICS.md.
     if (path.startsWith("/_internal/diag/")) {
       if (!env.ADMIN_TOKEN || request.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) return new Response("Forbidden", { status: 403 });
+      if (path === "/_internal/diag/exec") return handleExec(request, publicUrl, env);
       return handleDiag(path, publicUrl, env, (request as Request & { cf?: { colo?: string } }).cf?.colo);
     }
 
