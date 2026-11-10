@@ -94,11 +94,7 @@ You can skip this part for now and use dummy values in Part 6. Come back to it i
    npx wrangler containers registries list
    ```
    (Remove it later with `npx wrangler containers registries delete docker.io`.)
-4. Point the 10 `image` lines in `wrangler.jsonc` at your private repositories and development tag, keeping the `docker.io/` prefix, for example:
-   ```jsonc
-   "image": "docker.io/<org>/<repo>:<dev-tag>",
-   ```
-   List them with `Select-String '"image"' wrangler.jsonc`.
+4. The 10 `image` lines in `wrangler.jsonc` already point at the private repositories, for example `docker.io/syncfusion/dev-bold-identity:17.1.50_11052026_080254_dev`. To use a different tag, change them all (keep the `docker.io/` prefix). List them with `Select-String '"image"' wrangler.jsonc`.
 
 How it behaves: `wrangler deploy` pulls each image with the saved token and copies it into Cloudflare's own registry. Running containers do not use the token, so revoking it later does not stop them. A wrong token or tag fails the deploy with a pull error.
 
