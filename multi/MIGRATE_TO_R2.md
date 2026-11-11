@@ -81,22 +81,29 @@ This deletes the running site. Back up anything you need first. The old `app_dat
 
 You can skip this part for now and use dummy values in Part 6. Come back to it in Part 9.
 
-## Part 5. Private Docker Hub images (the image pull secret)
+## Part 5. Private Docker Hub images (pull, then push to Cloudflare's registry)
 
-1. Docker Hub > Account Settings > Personal access tokens > Generate. Permission: **Read-only**. Copy the token.
-2. Register it with Cloudflare. Wrangler prompts for the token and stores it, so do not put it in the command:
-   ```powershell
-   npx wrangler containers registries configure docker.io --dockerhub-username <dockerhub-username>
-   ```
-   To avoid the prompt: `"<token>" | npx wrangler containers registries configure docker.io --dockerhub-username <dockerhub-username>`
-3. Check it:
-   ```powershell
-   npx wrangler containers registries list
-   ```
-   (Remove it later with `npx wrangler containers registries delete docker.io`.)
-4. The 10 `image` lines in `wrangler.jsonc` already point at the private repositories, for example `docker.io/syncfusion/dev-bold-identity:17.1.50_11052026_080254_dev`. To use a different tag, change them all (keep the `docker.io/` prefix). List them with `Select-String '"image"' wrangler.jsonc`.
+This path needs no registry secret in Cloudflare (so no Secrets Store permission). You pull the images on your PC and push them to Cloudflare's own registry, `registry.cloudflare.com`. `wrangler.jsonc` already points at it, using account `ce1589d9d07e86f7f95eb9e12c05afac`.
 
-How it behaves: `wrangler deploy` pulls each image with the saved token and copies it into Cloudflare's own registry. Running containers do not use the token, so revoking it later does not stop them. A wrong token or tag fails the deploy with a pull error.
+1. Start Docker Desktop. Log in to Docker Hub (use a read-only access token as the password):
+   ```powershell
+   docker login -u packages@syncfusion.com
+   ```
+2. Log in to Cloudflare if you have not: `npx wrangler login`.
+3. From the `multi` folder, pull and push all 10 images (about 10 large images, so allow time and disk space):
+   ```powershell
+   .\scripts\push-images.ps1
+   ```
+   For a different tag: `.\scripts\push-images.ps1 -Tag <new-tag>`. Then change the tag in all 10 `image` lines of `wrangler.jsonc` to match (`Select-String '"image"' wrangler.jsonc`).
+   If PowerShell blocks the script: `powershell -ExecutionPolicy Bypass -File .\scripts\push-images.ps1`.
+4. Check the images arrived:
+   ```powershell
+   npx wrangler containers images list
+   ```
+   If push is denied, ask the infra team for the Containers permission on your token (the script does not need Secrets Store or R2).
+5. Each `image` line looks like `registry.cloudflare.com/ce1589d9d07e86f7f95eb9e12c05afac/dev-bold-identity:17.1.50_11052026_080254_dev`. `npm run deploy` then uses these without any Docker Hub access.
+
+Run Part 5 **before** Part 6, because the deploy fails if the images are not in the registry yet.
 
 ## Part 6. Deploy once, then set the secrets
 
