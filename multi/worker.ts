@@ -368,11 +368,27 @@ function appDuration(serverTiming: string | null): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
+const PATH_ROUTES: [string, string][] = [
+  ["/aiservice", "bold-ai"], ["/mcp", "bold-mcp"], ["/bi/api", "bi-api"], ["/bi/jobs", "bi-jobs"],
+  ["/bi/designer", "bi-designer"], ["/bi", "bi-web"], ["/api", "id-api"], ["/ums", "id-ums"],
+];
+
+export function hostForPath(path: string): string | undefined {
+  return PATH_ROUTES.find(([p]) => path === p || path.startsWith(p + "/"))?.[1];
+}
+
 export async function forwardInternal(request: Request, env: MultiEnv): Promise<Response> {
   const diag = env.DIAG_ENABLED === "true";
   const t0 = Date.now();
   const url = new URL(request.url);
-  const target = internalTarget(env, url.hostname);
+  // In Kubernetes/nginx the Idp address is the ingress, so a service can call it with any service's path
+  // (e.g. http://id-web/bi/jobs/health-check). Route such calls by path, like the public handler does.
+  let targetHost = url.hostname;
+  if (targetHost === "id-web") {
+    const routed = hostForPath(url.pathname);
+    if (routed && routed !== "id-web" && routed !== "bi-etl") targetHost = routed;
+  }
+  const target = internalTarget(env, targetHost);
   if (!target) return new Response(`Unknown internal service ${url.hostname}`, { status: 502 });
   // Same forwarding headers the public path sets, so the app resolves the tenant by the public host.
   const base = new URL(env.APP_BASE_URL || lastPublicBase || "https://localhost");
