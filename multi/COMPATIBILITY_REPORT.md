@@ -1,8 +1,6 @@
 # Cloudflare vs Kubernetes (Traefik) / Linux (nginx): compatibility report
 
-> **Important: reference values are unverified.** The Traefik `IngressRoute` and nginx `default.conf` are not in this repository or workspace, so the "Traefik / nginx" column below was written from memory of the earlier comparison, not re-read from your files. Treat every specific figure in that column (timeouts, buffer sizes, sticky cookie name, ETL regex, `/bi/designer/helper` location) as **to be confirmed**. The only figure that comes from your own requirements is the 200 MB body limit. Please attach both files so the column can be checked line by line.
-
-Reference: the working Traefik `IngressRoute` and the Linux nginx `default.conf` (not attached, see above).
+Reference files (now read in full): Traefik `bold-ingressroute` (ports 6000-6011, middlewares `gzip-compress`, `body-limit-200m`, `etl-rewrite`, ServersTransport `long-timeouts-transport`) and nginx `default.conf` (ports 6500-6511).
 Subject: `worker.ts` + `wrangler.jsonc` (10 Durable Object containers, one instance each).
 
 Status key: **Same** = already equivalent. **Changed** = changed in this revision. **Limit** = Cloudflare platform limit, cannot be configured away. **Open** = needs evidence before any change.
@@ -13,21 +11,21 @@ Status key: **Same** = already equivalent. **Changed** = changed in this revisio
 |---|---|---|---|---|
 | 1 | Routes | `/`, `/api`, `/ums`, `/bi`, `/bi/api`, `/bi/jobs`, `/bi/designer`, `/aiservice`, `/mcp`, `/etlservice` | Same ten targets, longest prefix first | Same |
 | 2 | Match style | String prefix (`/apixyz` goes to id-api) | Segment boundary (`/apixyz` goes to id-web) | Open. No known Bold path is affected. Left unchanged. |
-| 3 | ETL rewrite | `^/etlservice(/\|$)(.*)` replaced by `/$2`. The nginx file in this thread has **no** `/etlservice` block. | Prefix stripped, query kept, `/etlservice` becomes `/` | Same |
-| 4 | `/bi/designer/helper` | Separate nginx location with `Connection: upgrade` | Handled by the `/bi/designer` route, headers forwarded unchanged | Same (not yet verified live, see section 3) |
+| 3 | ETL rewrite | `^/etlservice(/\|$)(.*)` replaced by `/$2`. Traefik only: the nginx file has **no** `/etlservice` block, so ETL is routed on K8s only. | Prefix stripped, query kept, `/etlservice` becomes `/` | Same |
+| 4 | `/bi/designer/helper` | nginx: separate location with `Connection "upgrade"` (WebSocket). Traefik: covered by `/bi/designer`, WebSocket native | Handled by the `/bi/designer` route, headers forwarded unchanged | Same (not yet verified live, see section 3) |
 | 5 | Host | `Host $http_host` (original host) | Public requests keep the public host. Internal calls get the internal name plus `X-Forwarded-Host`. | Same |
 | 6 | `X-Forwarded-Proto/Host` | Set | Set (public and internal) | Same |
 | 7 | `X-Forwarded-For` | `$proxy_add_x_forwarded_for` | Passed through if Cloudflare supplies it | **Changed**: filled from `CF-Connecting-IP` when absent |
-| 8 | Cookies / auth | Passed through; sticky cookie (name to confirm) | Passed through untouched | Same. Sticky cookie not needed: one instance per service. |
+| 8 | Cookies / auth | Passed through; Traefik sticky cookie `bold.k8s.pod.id` (maxAge 600) | Passed through untouched | Same. Sticky cookie not needed: one instance per service. |
 | 9 | Body limit | 200 MB, returns 413 | Cloudflare edge limit by plan: 100 MB Free/Pro, 200 MB Business, 500 MB Enterprise | **Limit** plus **Changed**: Worker returns 413 above 200 MB when `Content-Length` is known |
-| 10 | Timeouts | (value to confirm from your files) | Edge waits about 100 s for first response bytes (HTTP 524); raisable only on Enterprise | **Limit** |
+| 10 | Timeouts | nginx 300 s read/send/connect; Traefik 300 s dial and response-header, 300 s idle | Edge waits about 100 s for first response bytes (HTTP 524) versus the 300 s above; raisable only on Enterprise | **Limit** |
 | 11 | Gzip | `gzip on` / Traefik `compress` | Cloudflare compresses at the edge (gzip/brotli) for compressible types | Same, nothing to configure |
-| 12 | Buffering | (buffer settings, to confirm) | Workers stream bodies; no buffer settings exist | **Limit**, no functional loss expected |
-| 13 | Request headers | (nginx header buffer setting, to confirm) | Cloudflare enforces its own header size limits | **Limit** |
+| 12 | Buffering | nginx `proxy_buffer_size 128k`, `proxy_buffers 4 256k`; Traefik `buffering.maxRequestBodyBytes` 209715200 | Workers stream bodies; no buffer settings exist | **Limit**, no functional loss expected |
+| 13 | Request headers | nginx `large_client_header_buffers 4 16k` | Cloudflare enforces its own header size limits | **Limit** |
 | 14 | Readiness | Kubernetes probes | TCP connect only (deliberate, see code comment) | **Changed**: optional HTTP readiness probe, off by default |
 | 15 | Internal calls | Service DNS names through cluster | `http://<service>` intercepted and sent to the Durable Object; `id-web` calls with other services' paths are now routed by path (earlier fix) | Same. **Changed**: `APP_BASE_URL` fallback (see 3.4). |
 | 16 | Lifecycle | Pods restart independently | `sleepAfter = 6h`, cold start up to 180 s, redeploy resets Durable Objects | Documented (section 4) |
-| 17 | Environment | K8s sets `BOLD_SERVICES_HOSTING_ENVIRONMENT` and `DEPLOY_MODE` for Kubernetes | We set `docker` and `docker_multi_container` | Open. Needs the K8s environment variables to compare. |
+| 17 | Environment | K8s sets `BOLD_SERVICES_HOSTING_ENVIRONMENT` and `DEPLOY_MODE` for Kubernetes | We set `docker` and `docker_multi_container` | Open. The ingress files contain no environment variables; the K8s deployment YAML is needed to compare. |
 
 ## 2. Evidence from the captured logs (two `wrangler tail` sessions)
 
@@ -77,3 +75,11 @@ Live (from the logs): login token 200, tenant lookup 200, dashboard list 200, de
 | Internal service calls | Working (live) |
 
 To close the gaps, run these with `npx wrangler tail --format pretty` open: log out and in, upload a file under 100 MB, export a dashboard, open the designer helper, and use the AI panel.
+
+
+## 5. Differences found when the real files were read
+
+* Traefik sticky cookie `bold.k8s.pod.id` is irrelevant here: `max_instances: 1` per service.
+* Traefik `PathPrefix` and nginx `location` are plain prefix matches; the Worker matches on a path-segment boundary. No Bold path is known to differ.
+* nginx uses `Connection keep-alive` for most locations and `upgrade` only for helper, aiservice and mcp. The Worker passes the client's own `Upgrade`/`Connection` headers, which is what a WebSocket client needs.
+* Compression: Traefik compresses only bodies of 1024 bytes or more; Cloudflare decides on its own.
