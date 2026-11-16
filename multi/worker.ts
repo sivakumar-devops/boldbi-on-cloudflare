@@ -26,6 +26,7 @@ export interface MultiEnv {
   STATIC_CACHE?: string; // "true" serves allow-listed static assets through the cached StaticAssets entrypoint (Workers Caching)
   STATIC_CACHE_UNVERSIONED_TTL?: string; // seconds for static files without a version in the URL (default 3600, 0 = do not cache)
   EXEC_ENABLED?: string; // "true" enables POST /_internal/diag/exec (run a shell command inside containers). Leave unset when not needed.
+  READINESS_PROBE_SERVICES?: string; // opt-in HTTP readiness probe after the TCP port opens: comma-separated hosts (e.g. "bi-designer") or "all". Default: off.
   DIAG_ENABLED?: string; // "true" records timing for internal calls (Server-Timing header + structured console.log)
 
   // Shared file storage (AWS S3, vendor "storage type 3")
@@ -211,6 +212,31 @@ const INTERNAL_HEALTH_PATHS: Record<string, string> = {
   "bi-designer": "/bi/designer/health-check", "bi-etl": "/health-check", "bold-ai": "/health-check", "bold-mcp": "/health-check",
 };
 
+const CLASS_HOSTS: Record<string, string> = {
+  IdWebContainer: "id-web", IdApiContainer: "id-api", IdUmsContainer: "id-ums", BiWebContainer: "bi-web", BiApiContainer: "bi-api",
+  BiJobsContainer: "bi-jobs", BiDesignerContainer: "bi-designer", BiEtlContainer: "bi-etl", BoldAiContainer: "bold-ai", BoldMcpContainer: "bold-mcp",
+};
+
+export function readinessProbeEnabled(env: Pick<MultiEnv, "READINESS_PROBE_SERVICES">, host: string | undefined): boolean {
+  const list = (env.READINESS_PROBE_SERVICES ?? "").split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
+  return !!host && (list.includes("all") || list.includes(host));
+}
+
+// Ready = the app answers HTTP with anything below 500 (a 404 still proves the app is serving).
+// Bounded: after timeoutMs we continue anyway and log, so a wrong health path can never block a service.
+export async function waitForHttpReady(probe: () => Promise<number>, timeoutMs = 90_000, intervalMs = 1_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      if ((await probe()) < 500) return true;
+    } catch { /* not accepting HTTP yet */ }
+    if (Date.now() + intervalMs >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+export const MAX_BODY_BYTES = 200 * 1024 * 1024;
+
 abstract class BoldServiceContainer extends BoldContainer {
   defaultPort = 80;
   protected servicePort = 80;
@@ -270,15 +296,36 @@ abstract class BoldServiceContainer extends BoldContainer {
     return true;
   }
 
+  private starting?: Promise<void>;
+
+  private async startAndProbe(request: Request): Promise<void> {
+    // A start triggered by an internal call (http://id-api) must not bake that internal name into APP_BASE_URL.
+    const internalCall = !new URL(request.url).hostname.includes(".");
+    const baseUrl = internalCall && lastPublicBase ? lastPublicBase : request.url;
+    await this.startAndWaitForPorts({
+      ports: this.servicePort,
+      startOptions: { envVars: buildContainerEnv(baseUrl, this.env), entrypoint: buildServiceEntrypoint(internalKeysFor(this.env)) },
+      cancellationOptions: { portReadyTimeoutMS: 180_000 },
+    });
+    const host = CLASS_HOSTS[this.constructor.name];
+    if (!readinessProbeEnabled(this.env, host)) return;
+    const path = INTERNAL_HEALTH_PATHS[host!];
+    const port = this.ctx.container!.getTcpPort(this.servicePort);
+    const ready = await waitForHttpReady(async () => {
+      const r = await port.fetch(`http://${host}${path}`, { signal: AbortSignal.timeout(10_000) });
+      await r.body?.cancel();
+      return r.status;
+    });
+    if (!ready) console.warn(JSON.stringify({ readiness: "timeout", host, path }));
+  }
+
   override async fetch(request: Request): Promise<Response> {
     let startMs = 0;
-    if (!this.ctx.container?.running) {
+    if (!this.ctx.container?.running || this.starting) {
       const t0 = Date.now();
-      await this.startAndWaitForPorts({
-        ports: this.servicePort,
-        startOptions: { envVars: buildContainerEnv(request.url, this.env), entrypoint: buildServiceEntrypoint(internalKeysFor(this.env)) },
-        cancellationOptions: { portReadyTimeoutMS: 180_000 },
-      });
+      // Concurrent first requests share one start-up instead of each starting the container.
+      this.starting ??= this.startAndProbe(request).finally(() => { this.starting = undefined; });
+      await this.starting;
       startMs = Date.now() - t0;
     }
     const t1 = Date.now();
@@ -712,9 +759,14 @@ export default {
       }
     }
 
+    // Same cap as nginx client_max_body_size 200M. Cloudflare's own plan limit applies before this (see COMPATIBILITY_REPORT.md).
+    if (Number(request.headers.get("Content-Length")) > MAX_BODY_BYTES) return new Response("Request Entity Too Large", { status: 413 });
+
     const headers = new Headers(request.headers);
     headers.set("X-Forwarded-Proto", publicUrl.protocol.slice(0, -1));
     headers.set("X-Forwarded-Host", publicUrl.host);
+    const clientIp = request.headers.get("CF-Connecting-IP");
+    if (clientIp && !headers.has("X-Forwarded-For")) headers.set("X-Forwarded-For", clientIp);
 
     const forwardRequest = new Request(request, { headers });
 

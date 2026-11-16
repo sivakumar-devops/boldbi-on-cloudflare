@@ -18,7 +18,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport, locationHintFor, serviceStub, staticCacheEligible, staticCacheTtl, applyStaticCachePolicy } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport, locationHintFor, serviceStub, staticCacheEligible, staticCacheTtl, applyStaticCachePolicy, readinessProbeEnabled, waitForHttpReady } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -495,5 +495,39 @@ describe("diag exec", () => {
     const body = await res.json() as Record<string, { output?: string }>;
     expect(body["bi-designer"].output).toContain("ls -la /application");
     expect(diagExec).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("compatibility changes", () => {
+  it("sets X-Forwarded-For from CF-Connecting-IP only when absent", async () => {
+    const { fetch, idWebFetch } = setup();
+    await fetch("/", { headers: { "CF-Connecting-IP": "1.2.3.4" } });
+    expect(((idWebFetch.mock.calls[0] as unknown[])[0] as Request).headers.get("X-Forwarded-For")).toBe("1.2.3.4");
+    await fetch("/", { headers: { "CF-Connecting-IP": "1.2.3.4", "X-Forwarded-For": "9.9.9.9" } });
+    expect(((idWebFetch.mock.calls[1] as unknown[])[0] as Request).headers.get("X-Forwarded-For")).toBe("9.9.9.9");
+  });
+
+  it("rejects bodies over 200 MB with 413 and lets smaller ones through", async () => {
+    const { fetch, idWebFetch } = setup();
+    const big = await fetch("/", { method: "POST", headers: { "Content-Length": String(200 * 1024 * 1024 + 1) }, body: "x" });
+    expect(big.status).toBe(413);
+    expect(idWebFetch).not.toHaveBeenCalled();
+    const ok = await fetch("/", { method: "POST", headers: { "Content-Length": "10" }, body: "x" });
+    expect(ok.status).toBe(200);
+  });
+
+  it("enables the readiness probe only for listed services", () => {
+    expect(readinessProbeEnabled({}, "bi-designer")).toBe(false);
+    expect(readinessProbeEnabled({ READINESS_PROBE_SERVICES: "bi-designer" }, "bi-designer")).toBe(true);
+    expect(readinessProbeEnabled({ READINESS_PROBE_SERVICES: "bi-designer" }, "bi-api")).toBe(false);
+    expect(readinessProbeEnabled({ READINESS_PROBE_SERVICES: "all" }, "bi-api")).toBe(true);
+  });
+
+  it("waitForHttpReady retries until status < 500, and gives up at the timeout", async () => {
+    const statuses = [503, 500, 404];
+    const probe = vi.fn(async () => statuses.shift()!);
+    expect(await waitForHttpReady(probe, 1000, 1)).toBe(true);
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(await waitForHttpReady(async () => { throw new Error("refused"); }, 20, 5)).toBe(false);
   });
 });
