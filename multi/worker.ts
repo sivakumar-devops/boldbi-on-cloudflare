@@ -813,4 +813,20 @@ export default {
 
     return withTiming(secureApplicationResponse(targetResponse, publicUrl), `worker-total;dur=${Date.now() - startedAt}`);
   },
+
+  async scheduled(event: { cron: string; scheduledTime: number }, env: MultiEnv): Promise<void> {
+    const hosts = Object.keys(SERVICE_BINDINGS);
+    await Promise.allSettled(
+      hosts.map(async (host) => {
+        const stub = serviceStub(env, host);
+        if (!stub) return;
+        const path = INTERNAL_HEALTH_PATHS[host] || '/health-check';
+        try {
+          await stub.fetch(new Request('http://' + host + path, { headers: { 'User-Agent': 'Cloudflare-Worker-Warmup' } }));
+        } catch (e) {
+          console.warn('[warmup] failed for ' + host + ':', e);
+        }
+      })
+    );
+  },
 };

@@ -531,3 +531,19 @@ describe("compatibility changes", () => {
     expect(await waitForHttpReady(async () => { throw new Error("refused"); }, 20, 5)).toBe(false);
   });
 });
+
+  it("warms up all 10 services on scheduled event", async () => {
+    const s = setup();
+    expect(worker.scheduled).toBeDefined();
+    await worker.scheduled!({ cron: "*/15 * * * *", scheduledTime: Date.now() }, s.env);
+    expect(s.idWebFetch).toHaveBeenCalled();
+    expect(s.idApiFetch).toHaveBeenCalled();
+    expect(s.idUmsFetch).toHaveBeenCalled();
+    expect(s.biWebFetch).toHaveBeenCalled();
+    expect(s.biApiFetch).toHaveBeenCalled();
+    expect(s.biJobsFetch).toHaveBeenCalled();
+    expect(s.biDesignerFetch).toHaveBeenCalled();
+    expect(s.etlFetch).toHaveBeenCalled();
+    expect(s.aiFetch).toHaveBeenCalled();
+    expect(s.mcpFetch).toHaveBeenCalled();
+  });

@@ -8,6 +8,9 @@
   "observability": {
     "enabled": true
   },
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
   "containers": [
     {
       "class_name": "IdWebContainer",
