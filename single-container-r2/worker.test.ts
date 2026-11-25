@@ -5,7 +5,7 @@ vi.mock("@cloudflare/containers", () => ({ Container: class {
   startAndWaitForPorts = vi.fn(async () => {});
   async fetch(_request: Request) { return new Response("container-origin"); }
 } }));
-import worker, { REQUIRED_KEYS, buildContainerEnv, missingKeys } from "./worker";
+import worker, { REQUIRED_KEYS, buildContainerEnv, handleDiag, missingKeys } from "./worker";
 
 const full = Object.fromEntries(REQUIRED_KEYS.map(k => [k, `v-${k}`]));
 
@@ -32,5 +32,26 @@ describe("single-container-r2 Worker", () => {
     expect(getByName).toHaveBeenCalledWith("boldbi-r2", { locationHint: "enam" });
     expect(containerFetch.mock.calls[0][0].headers.get("X-Forwarded-Proto")).toBe("https");
     expect(res.headers.get("Content-Security-Policy")).toContain("upgrade-insecure-requests");
+  });
+  it("diagnostics reject a missing or wrong token and never reach the container", async () => {
+    const diagRun = vi.fn();
+    const getByName = vi.fn(() => ({ diagRun }));
+    const env = { BOLDBI_CONTAINER: { getByName }, ADMIN_TOKEN: "secret" } as never;
+    for (const headers of [{}, { "X-Admin-Token": "wrong" }]) {
+      const res = await worker.fetch(new Request("https://app.example/_internal/diag/logs", { headers }), env);
+      expect(res.status).toBe(403);
+    }
+    expect(diagRun).not.toHaveBeenCalled();
+  });
+  it("diagnostics refuse unset ADMIN_TOKEN and unsafe file names, and tail a safe one", async () => {
+    const diagRun = vi.fn(async () => ({ ok: true, out: "line1" }));
+    const req = (q: string, token = "secret") => new Request(`https://app.example/_internal/diag/logs${q}`, { headers: { "X-Admin-Token": token } });
+    expect((await handleDiag(req("", ""), {} as never, { diagRun })).status).toBe(403);
+    const env = { ADMIN_TOKEN: "secret" } as never;
+    expect((await handleDiag(req("?file=/etc/passwd"), env, { diagRun })).status).toBe(400);
+    expect((await handleDiag(req("?file=/application/../etc/x.log"), env, { diagRun })).status).toBe(400);
+    expect((await handleDiag(req("?file=/application/a.log&grep=a'b"), env, { diagRun })).status).toBe(400);
+    const ok = await handleDiag(req("?file=/application/app_data/logs/a.log&grep=ERROR"), env, { diagRun });
+    expect(await ok.text()).toBe("line1");
   });
 });

@@ -52,3 +52,15 @@ npm run deploy
 
 The container is placed with the `enam` (US East) location hint, near the database.
 Open the Worker URL; the first start takes a few minutes.
+
+## Diagnostics (read-only logs)
+
+Set a secret `ADMIN_TOKEN` (`npx wrangler secret put ADMIN_TOKEN`) and redeploy the Worker only
+(`npm run deploy:worker`, which leaves the running container alone). Without it every call returns 403.
+
+```powershell
+$h = @{ "X-Admin-Token" = "<token>" }
+Invoke-RestMethod -Headers $h "https://poc-cloudflare-bi.synctester.com/_internal/diag/logs"                                   # list log files
+Invoke-RestMethod -Headers $h "https://poc-cloudflare-bi.synctester.com/_internal/diag/logs?file=/application/<path>.log&lines=300&grep=ERROR"
+```
+It never starts the container, and only reads `.log`/`.txt` files under `/application`, `/var/log`, `/tmp`.
