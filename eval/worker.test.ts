@@ -14,7 +14,7 @@ import worker, { BoldBIEvalContainer, buildEvalContainerEnv } from "./worker";
 function setup() {
   const evalFetch = vi.fn(async (_request: Request) => new Response("eval", { headers: { "Content-Type": "text/html" } }));
   const getByName = vi.fn(() => ({ fetch: evalFetch }));
-  const env = { BOLDBI_EVAL_CONTAINER: { getByName }, EVAL_DB_PASSWORD: "test-db", EVAL_ADMIN_PASSWORD: "test-admin" };
+  const env = { BOLDBI_EVAL_CONTAINER: { getByName }, EVAL_DB_HOST: "db.example", EVAL_DB_PASSWORD: "test-db", EVAL_ADMIN_PASSWORD: "test-admin" };
   const fetch = (path: string, cookie = "", method = "GET") => worker.fetch(new Request(`https://app.example${path}`, { method, headers: { Cookie: cookie } }), env as never);
   return { fetch, evalFetch, getByName, env };
 }
@@ -22,7 +22,7 @@ describe("eval Worker", () => {
   it("checks HTTP readiness without sending HTTP probes to PostgreSQL", async () => {
     readiness.mockClear();
     const container = new BoldBIEvalContainer({} as never, {
-      EVAL_DB_PASSWORD: "test-db", EVAL_ADMIN_PASSWORD: "test-admin",
+      EVAL_DB_HOST: "db.example", EVAL_DB_PASSWORD: "test-db", EVAL_ADMIN_PASSWORD: "test-admin",
     } as never);
     const response = await container.fetch(new Request("https://app.example/"));
     expect(await response.text()).toBe("container-origin");
@@ -49,7 +49,7 @@ describe("eval Worker", () => {
   it("configures R2 storage environment variables when bucket is set", () => {
     const env = {
       BOLDBI_EVAL_CONTAINER: {} as never,
-      EVAL_DB_PASSWORD: "db-pass",
+      EVAL_DB_HOST: "db.example", EVAL_DB_PASSWORD: "db-pass",
       EVAL_ADMIN_PASSWORD: "admin-pass",
       BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME: "my-eval-bucket",
       BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID: "r2-key-id",
@@ -58,6 +58,8 @@ describe("eval Worker", () => {
       BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME: "boldbi",
     };
     const vars = buildEvalContainerEnv(env);
+    expect(vars.BOLD_SERVICES_DB_HOST).toBe("db.example");
+    expect(vars.BOLD_SERVICES_DB_PORT).toBe("5432");
     expect(vars.BOLD_SERVICES_STORAGETYPE).toBe("5");
     expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME).toBe("my-eval-bucket");
     expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID).toBe("r2-key-id");

@@ -2,6 +2,11 @@ import { Container } from "@cloudflare/containers";
 interface EvalEnv {
   BOLDBI_EVAL_CONTAINER: DurableObjectNamespace<BoldBIEvalContainer>;
   EVAL_DB_PASSWORD: string;
+  EVAL_DB_HOST: string;
+  EVAL_DB_PORT?: string;
+  EVAL_DB_USER?: string;
+  EVAL_DB_TYPE?: string;
+  EVAL_DB_MAINTENANCE_DB?: string;
   EVAL_ADMIN_PASSWORD: string;
   EVAL_ADMIN_EMAIL?: string;
 
@@ -23,10 +28,11 @@ const R2_KEYS = [
 
 export function buildEvalContainerEnv(env: EvalEnv): Record<string, string> {
   const vars: Record<string, string> = {
-    BOLD_SERVICES_DB_TYPE: "postgresql",
-    BOLD_SERVICES_DB_HOST: "localhost",
-    BOLD_SERVICES_POSTGRESQL_MAINTENANCE_DB: "postgres",
-    BOLD_SERVICES_DB_USER: "postgres",
+    BOLD_SERVICES_DB_TYPE: env.EVAL_DB_TYPE || "postgresql",
+    BOLD_SERVICES_DB_HOST: env.EVAL_DB_HOST,
+    BOLD_SERVICES_DB_PORT: env.EVAL_DB_PORT || "5432",
+    BOLD_SERVICES_POSTGRESQL_MAINTENANCE_DB: env.EVAL_DB_MAINTENANCE_DB || "postgres",
+    BOLD_SERVICES_DB_USER: env.EVAL_DB_USER || "postgres",
     BOLD_SERVICES_DB_PASSWORD: env.EVAL_DB_PASSWORD,
     BOLD_SERVICES_USER_EMAIL: env.EVAL_ADMIN_EMAIL || "testuser@boldbi.com",
     BOLD_SERVICES_USER_PASSWORD: env.EVAL_ADMIN_PASSWORD,
@@ -67,7 +73,7 @@ export class BoldBIEvalContainer extends Container<EvalEnv> {
 export default {
   async fetch(request: Request, env: EvalEnv): Promise<Response> {
     const url = new URL(request.url);
-    if (!env.EVAL_DB_PASSWORD || !env.EVAL_ADMIN_PASSWORD) return new Response("Configure the eval secrets first.", { status: 503 });
+    if (!env.EVAL_DB_HOST || !env.EVAL_DB_PASSWORD || !env.EVAL_ADMIN_PASSWORD) return new Response("Configure the eval secrets first.", { status: 503 });
     const headers = new Headers(request.headers);
     headers.set("X-Forwarded-Proto", url.protocol.slice(0, -1));
     headers.set("X-Forwarded-Host", url.host);
