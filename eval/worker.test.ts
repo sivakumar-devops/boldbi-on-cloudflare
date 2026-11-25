@@ -9,7 +9,7 @@ vi.mock("@cloudflare/containers", () => ({ Container: class {
   startAndWaitForPorts = readiness;
   async fetch(_request: Request) { return new Response("container-origin"); }
 } }));
-import worker, { BoldBIEvalContainer, buildEvalContainerEnv } from "./worker";
+import worker, { BoldBIEvalContainer, buildEvalContainerEnv, locationHintFor } from "./worker";
 
 function setup() {
   const evalFetch = vi.fn(async (_request: Request) => new Response("eval", { headers: { "Content-Type": "text/html" } }));
@@ -33,7 +33,7 @@ describe("eval Worker", () => {
   it("routes absolute application paths to eval and preserves HTTPS", async () => {
     const { fetch, evalFetch, getByName } = setup();
     const response = await fetch("/ums/theme/styles/application?theme=light", "other=ok");
-    expect(getByName).toHaveBeenCalledWith("boldbi-eval");
+    expect(getByName).toHaveBeenCalledWith("boldbi-eval", { locationHint: "enam" });
     const request = evalFetch.mock.calls[0][0];
     expect(request.headers.get("X-Forwarded-Proto")).toBe("https");
     expect(request.headers.get("Cookie")).toBe("other=ok");
@@ -66,5 +66,9 @@ describe("eval Worker", () => {
     expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY).toBe("r2-secret-key");
     expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL).toBe("https://acct.r2.cloudflarestorage.com");
     expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME).toBe("boldbi");
+  });
+  it("defaults the location hint to enam and allows none", () => {
+    expect(locationHintFor({})).toBe("enam");
+    expect(locationHintFor({ DO_LOCATION_HINT: "none" })).toBeUndefined();
   });
 });

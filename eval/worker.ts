@@ -9,6 +9,8 @@ interface EvalEnv {
   EVAL_DB_MAINTENANCE_DB?: string;
   EVAL_ADMIN_PASSWORD: string;
   EVAL_ADMIN_EMAIL?: string;
+  DO_LOCATION_HINT?: string; // enam (default, US East) | wnam | weur | ... | none
+  DO_NAME_SUFFIX?: string; // change to create a new instance that honours the hint
 
   // Cloudflare R2 storage settings (vendor storage type 5)
   BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME?: string;
@@ -50,6 +52,16 @@ export function buildEvalContainerEnv(env: EvalEnv): Record<string, string> {
   return vars;
 }
 
+const LOCATION_HINTS = ["wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me"] as const;
+type LocationHint = (typeof LOCATION_HINTS)[number];
+
+// A hint applies only when the Durable Object is first created; best effort (a region, not a city).
+export function locationHintFor(env: Pick<EvalEnv, "DO_LOCATION_HINT">): LocationHint | undefined {
+  const v = (env.DO_LOCATION_HINT ?? "enam").trim().toLowerCase();
+  if (v === "none" || v === "") return undefined;
+  return (LOCATION_HINTS as readonly string[]).includes(v) ? (v as LocationHint) : "enam";
+}
+
 export class BoldBIEvalContainer extends Container<EvalEnv> {
   defaultPort = 80;
   // The SDK default, http://ping/, enters BoldBI's hostname-dependent login
@@ -77,7 +89,10 @@ export default {
     const headers = new Headers(request.headers);
     headers.set("X-Forwarded-Proto", url.protocol.slice(0, -1));
     headers.set("X-Forwarded-Host", url.host);
-    const response = await env.BOLDBI_EVAL_CONTAINER.getByName("boldbi-eval").fetch(new Request(request, { headers }));
+    const response = await env.BOLDBI_EVAL_CONTAINER.getByName(
+      env.DO_NAME_SUFFIX?.trim() ? `boldbi-eval-${env.DO_NAME_SUFFIX.trim()}` : "boldbi-eval",
+      locationHintFor(env) ? { locationHint: locationHintFor(env) } : undefined,
+    ).fetch(new Request(request, { headers }));
     if (response.status === 101) return response;
     const secured = new Response(response.body, response);
     secured.headers.set("Cache-Control", "private, no-store");
