@@ -88,6 +88,14 @@ async function sameToken(given: string | null, expected: string | undefined): Pr
 export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: string): Promise<{ ok: boolean; out: string; err?: string }> }): Promise<Response> {
   if (!(await sameToken(request.headers.get("X-Admin-Token"), env.ADMIN_TOKEN))) return new Response("Forbidden", { status: 403 });
   const url = new URL(request.url);
+  if (url.pathname === "/_internal/diag/logs/clear") {
+    // Empties (does not delete) every file under app_data/logs, so running services keep writing to them.
+    if (request.method !== "POST") return Response.json({ error: "use POST" }, { status: 405 });
+    console.log(JSON.stringify({ diag: "clear-logs" }));
+    const r = await stub.diagRun("find /application/app_data/logs -type f -exec truncate -s 0 {} + ; echo cleared $(find /application/app_data/logs -type f | wc -l) files");
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    return Response.json({ result: r.out });
+  }
   if (request.method !== "GET") return new Response("Not found", { status: 404 });
   if (url.pathname === "/_internal/diag/logs.tgz") {
     // The whole /application/app_data/logs folder as one gzip tar (sent through exec as base64, then decoded here).

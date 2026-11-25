@@ -71,3 +71,6 @@ Download the whole `/application/app_data/logs` folder as one archive:
 Invoke-WebRequest -Headers $h "https://poc-cloudflare-bi.synctester.com/_internal/diag/logs.tgz" -OutFile boldbi-logs.tgz
 tar -xzf boldbi-logs.tgz
 ```
+
+Download the whole logs folder: `GET /_internal/diag/logs.tgz`.
+Empty the logs folder before reproducing an issue: `POST /_internal/diag/logs/clear` (files are truncated, not deleted).
