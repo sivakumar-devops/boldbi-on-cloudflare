@@ -107,7 +107,12 @@ export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (new URL(request.url).pathname.startsWith("/_internal/diag/")) {
-      return handleDiag(request, env, env.BOLDBI_CONTAINER.getByName("boldbi-r2", { locationHint: "enam" }));
+      try {
+        return await handleDiag(request, env, env.BOLDBI_CONTAINER.getByName("boldbi-r2", { locationHint: "enam" }));
+      } catch (e) {
+        console.log(JSON.stringify({ diag: "error", error: String(e) }));
+        return Response.json({ error: String(e) }, { status: 502 });
+      }
     }
     const missing = missingKeys(env as Partial<Record<string, string>>);
     if (missing.length) return new Response(`Missing configuration: ${missing.join(", ")}`, { status: 503 });
