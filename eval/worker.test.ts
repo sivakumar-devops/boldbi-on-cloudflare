@@ -9,7 +9,7 @@ vi.mock("@cloudflare/containers", () => ({ Container: class {
   startAndWaitForPorts = readiness;
   async fetch(_request: Request) { return new Response("container-origin"); }
 } }));
-import worker, { BoldBIEvalContainer } from "./worker";
+import worker, { BoldBIEvalContainer, buildEvalContainerEnv } from "./worker";
 
 function setup() {
   const evalFetch = vi.fn(async (_request: Request) => new Response("eval", { headers: { "Content-Type": "text/html" } }));
@@ -45,5 +45,24 @@ describe("eval Worker", () => {
     env.EVAL_DB_PASSWORD = "";
     expect((await fetch("/")).status).toBe(503);
     expect(evalFetch).not.toHaveBeenCalled();
+  });
+  it("configures R2 storage environment variables when bucket is set", () => {
+    const env = {
+      BOLDBI_EVAL_CONTAINER: {} as never,
+      EVAL_DB_PASSWORD: "db-pass",
+      EVAL_ADMIN_PASSWORD: "admin-pass",
+      BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME: "my-eval-bucket",
+      BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID: "r2-key-id",
+      BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY: "r2-secret-key",
+      BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL: "https://acct.r2.cloudflarestorage.com",
+      BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME: "boldbi",
+    };
+    const vars = buildEvalContainerEnv(env);
+    expect(vars.BOLD_SERVICES_STORAGETYPE).toBe("5");
+    expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME).toBe("my-eval-bucket");
+    expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID).toBe("r2-key-id");
+    expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY).toBe("r2-secret-key");
+    expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL).toBe("https://acct.r2.cloudflarestorage.com");
+    expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME).toBe("boldbi");
   });
 });

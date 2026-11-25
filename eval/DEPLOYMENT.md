@@ -72,12 +72,34 @@ Edit `wrangler.jsonc`: set `account_id` to your account. Change `name`
 
 ## 2. Set secrets
 
+Required admin & PostgreSQL passwords:
 ```powershell
 npx wrangler secret put EVAL_DB_PASSWORD
 npx wrangler secret put EVAL_ADMIN_PASSWORD
 ```
 
-Optional: `EVAL_ADMIN_EMAIL` to replace the default administrator email.
+Optional: `EVAL_ADMIN_EMAIL` to replace the default administrator email (`testuser@boldbi.com`).
+
+### Cloudflare R2 shared storage (Optional / Recommended)
+
+To persist dashboards, extracts, and shared app data in Cloudflare R2 (storage type `5`):
+
+```powershell
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME
+# e.g., boldbi-r2-data
+
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID
+# Your Cloudflare R2 Access Key ID
+
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY
+# Your Cloudflare R2 Secret Access Key
+
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL
+# e.g., https://ce1589d9d07e86f7f95eb9e12c05afac.r2.cloudflarestorage.com
+
+npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME
+# e.g., boldbi-eval-data
+```
 
 ## 3. Deploy
 

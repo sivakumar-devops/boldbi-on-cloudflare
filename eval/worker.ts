@@ -4,6 +4,44 @@ interface EvalEnv {
   EVAL_DB_PASSWORD: string;
   EVAL_ADMIN_PASSWORD: string;
   EVAL_ADMIN_EMAIL?: string;
+
+  // Cloudflare R2 storage settings (vendor storage type 5)
+  BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL?: string;
+  BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME?: string;
+}
+
+const R2_KEYS = [
+  "BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID",
+  "BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL",
+  "BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME",
+] as const;
+
+export function buildEvalContainerEnv(env: EvalEnv): Record<string, string> {
+  const vars: Record<string, string> = {
+    BOLD_SERVICES_DB_TYPE: "postgresql",
+    BOLD_SERVICES_DB_HOST: "localhost",
+    BOLD_SERVICES_POSTGRESQL_MAINTENANCE_DB: "postgres",
+    BOLD_SERVICES_DB_USER: "postgres",
+    BOLD_SERVICES_DB_PASSWORD: env.EVAL_DB_PASSWORD,
+    BOLD_SERVICES_USER_EMAIL: env.EVAL_ADMIN_EMAIL || "testuser@boldbi.com",
+    BOLD_SERVICES_USER_PASSWORD: env.EVAL_ADMIN_PASSWORD,
+    BOLD_SERVICES_REVERSE_PROXY: "true",
+    BOLD_SERVICES_CONSOLE_LOG_ENABLED: "true",
+  };
+
+  if (env.BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME) {
+    vars.BOLD_SERVICES_STORAGETYPE = "5";
+    for (const k of R2_KEYS) {
+      if (env[k]) vars[k] = env[k]!;
+    }
+  }
+
+  return vars;
 }
 
 export class BoldBIEvalContainer extends Container<EvalEnv> {
@@ -13,23 +51,13 @@ export class BoldBIEvalContainer extends Container<EvalEnv> {
   pingEndpoint = "localhost/health-check";
   sleepAfter = "6h";
   enableInternet = true;
-  envVars = {
-    BOLD_SERVICES_DB_TYPE: "postgresql",
-    BOLD_SERVICES_DB_HOST: "localhost",
-    BOLD_SERVICES_POSTGRESQL_MAINTENANCE_DB: "postgres",
-    BOLD_SERVICES_DB_USER: "postgres",
-    BOLD_SERVICES_DB_PASSWORD: this.env.EVAL_DB_PASSWORD,
-    BOLD_SERVICES_USER_EMAIL: this.env.EVAL_ADMIN_EMAIL || "testuser@boldbi.com",
-    BOLD_SERVICES_USER_PASSWORD: this.env.EVAL_ADMIN_PASSWORD,
-    BOLD_SERVICES_REVERSE_PROXY: "true",
-    BOLD_SERVICES_CONSOLE_LOG_ENABLED: "true",
-  };
 
   override async fetch(request: Request): Promise<Response> {
     await this.startAndWaitForPorts({
       // The SDK probes readiness with HTTP, not a raw TCP connection.
       // PostgreSQL's binary protocol on 5432 cannot answer that probe.
       ports: [80],
+      startOptions: { envVars: buildEvalContainerEnv(this.env) },
       cancellationOptions: { instanceGetTimeoutMS: 120000, portReadyTimeoutMS: 300000 },
     });
     return super.fetch(request);
