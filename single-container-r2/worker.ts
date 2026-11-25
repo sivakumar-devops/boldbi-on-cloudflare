@@ -17,7 +17,7 @@ export const REQUIRED_KEYS = [
   "BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME",
 ] as const;
 
-type Env = { BOLDBI_CONTAINER: DurableObjectNamespace<BoldBIEvalContainer>; OPTIONAL_LIBS?: string; ADMIN_TOKEN?: string } &
+type Env = { BOLDBI_CONTAINER: DurableObjectNamespace<BoldBIContainer>; OPTIONAL_LIBS?: string; ADMIN_TOKEN?: string } &
   Partial<Record<(typeof REQUIRED_KEYS)[number], string>>;
 
 export function missingKeys(env: Partial<Record<string, string>>): string[] {
@@ -35,7 +35,7 @@ export function buildContainerEnv(env: Env): Record<string, string> {
   return vars;
 }
 
-export class BoldBIEvalContainer extends Container<Env> {
+export class BoldBIContainer extends Container<Env> {
   defaultPort = 80;
   // The default http://ping/ enters Bold BI's hostname-dependent redirects.
   pingEndpoint = "localhost/health-check";
