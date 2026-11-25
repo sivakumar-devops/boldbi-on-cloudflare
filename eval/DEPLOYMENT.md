@@ -72,36 +72,12 @@ Edit `wrangler.jsonc`: set `account_id` to your account. Change `name`
 
 ## 2. Set secrets
 
-The image `dev-boldbi-docker` has no bundled PostgreSQL, so an external
-PostgreSQL server is required. Required secrets:
 ```powershell
-npx wrangler secret put EVAL_DB_HOST
 npx wrangler secret put EVAL_DB_PASSWORD
 npx wrangler secret put EVAL_ADMIN_PASSWORD
 ```
 
-Optional: `EVAL_DB_PORT` (default 5432), `EVAL_DB_USER` (default `postgres`), `EVAL_DB_MAINTENANCE_DB` (default `postgres`), `EVAL_DB_TYPE` (default `postgresql`), and `EVAL_ADMIN_EMAIL` to replace the default administrator email (`testuser@boldbi.com`).
-
-### Cloudflare R2 shared storage (Optional / Recommended)
-
-To persist dashboards, extracts, and shared app data in Cloudflare R2 (storage type `5`):
-
-```powershell
-npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME
-# e.g., boldbi-r2-data
-
-npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID
-# Your Cloudflare R2 Access Key ID
-
-npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY
-# Your Cloudflare R2 Secret Access Key
-
-npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL
-# e.g., https://ce1589d9d07e86f7f95eb9e12c05afac.r2.cloudflarestorage.com
-
-npx wrangler secret put BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME
-# e.g., boldbi-eval-data
-```
+Optional: `EVAL_ADMIN_EMAIL` to replace the default administrator email.
 
 ## 3. Deploy
 
@@ -175,5 +151,3 @@ Removes everything this guide created. This is permanent and discards all data.
 
 References: [Vendor eval deployment](https://help.boldbi.com/deploying-bold-bi/deploying-on-docker/bold-bi-on-docker/bold-bi-eval-on-single-container/),
 [container lifecycle](https://developers.cloudflare.com/containers/concepts/architecture/).
-
-> Note: with `dev-boldbi-docker` the database is external (`EVAL_DB_*` secrets). Sections above that describe the bundled PostgreSQL apply only to the old `-eval` image.

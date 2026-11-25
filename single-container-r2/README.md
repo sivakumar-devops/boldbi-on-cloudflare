@@ -1,0 +1,42 @@
+# Bold BI single container on Cloudflare (R2 storage + external database)
+
+One Bold BI container (`syncfusion/boldbi:17.1.51_11062026_072923_193588_patch`) behind a Worker.
+Files are stored in Cloudflare R2 (storage type 5). The database is external; none is bundled.
+It is the Cloudflare equivalent of the compose file with `BOLD_SERVICES_*` auto-deployment variables.
+
+## Settings
+
+Plain variables (already in `wrangler.jsonc`): `BOLD_SERVICES_DB_TYPE=postgresql`, `OPTIONAL_LIBS`.
+The Worker also sets `BOLD_SERVICES_STORAGETYPE=5` and `BOLD_SERVICES_REVERSE_PROXY=true` itself.
+
+Secrets (mandatory):
+
+| Secret | Purpose |
+| --- | --- |
+| `BOLD_SERVICES_UNLOCK_KEY` | Offline unlock key |
+| `BOLD_SERVICES_DB_HOST` | Database server name |
+| `BOLD_SERVICES_DB_USER` | Database user |
+| `BOLD_SERVICES_DB_PASSWORD` | Database password |
+| `BOLD_SERVICES_USER_EMAIL` | Admin email |
+| `BOLD_SERVICES_USER_PASSWORD` | Admin password (6+ chars, upper, lower, digit, special) |
+| `BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME` | R2 bucket |
+| `BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID` | R2 access key |
+| `BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY` | R2 secret key |
+| `BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL` | `https://<account-id>.r2.cloudflarestorage.com` |
+| `BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME` | Unique folder; change it for a clean start |
+
+The Worker answers 503 and lists any missing setting. Optional Bold BI variables
+(`BOLD_SERVICES_DB_PORT`, `_DB_NAME`, ...) are not passed; the defaults apply (PostgreSQL port 5432).
+
+## Deploy
+
+```powershell
+cd single-container-r2
+npm install
+npx wrangler secret list
+npx wrangler secret put <NAME>     # only for names that are missing
+npm run deploy
+```
+
+The container is placed with the `enam` (US East) location hint, near the database.
+Open the Worker URL; the first start takes a few minutes.

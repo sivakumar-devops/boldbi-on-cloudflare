@@ -1,13 +1,11 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ticket287457",
-  "account_id": "ce1589d9d07e86f7f95eb9e12c05afac",
+  "name": "boldbi-eval",
+  "account_id": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
   "main": "worker.ts",
   "compatibility_date": "2026-10-16",
   "workers_dev": true,
-  "observability": {
-    "enabled": true
-  },
+  "observability": { "enabled": true },
   "containers": [
     {
       "class_name": "BoldBIEvalContainer",
@@ -18,27 +16,9 @@
     }
   ],
   "durable_objects": {
-    "bindings": [
-      {
-        "name": "BOLDBI_EVAL_CONTAINER",
-        "class_name": "BoldBIEvalContainer"
-      }
-    ]
+    "bindings": [{ "name": "BOLDBI_EVAL_CONTAINER", "class_name": "BoldBIEvalContainer" }]
   },
   "exports": {
-    "BoldBIEvalContainer": {
-      "type": "durable-object",
-      "storage": "sqlite"
-    },
-    "IdWebContainer": { "type": "durable-object", "state": "deleted" },
-    "IdApiContainer": { "type": "durable-object", "state": "deleted" },
-    "IdUmsContainer": { "type": "durable-object", "state": "deleted" },
-    "BiWebContainer": { "type": "durable-object", "state": "deleted" },
-    "BiApiContainer": { "type": "durable-object", "state": "deleted" },
-    "BiJobsContainer": { "type": "durable-object", "state": "deleted" },
-    "BiDesignerContainer": { "type": "durable-object", "state": "deleted" },
-    "BiEtlContainer": { "type": "durable-object", "state": "deleted" },
-    "BoldAiContainer": { "type": "durable-object", "state": "deleted" },
-    "BoldMcpContainer": { "type": "durable-object", "state": "deleted" }
+    "BoldBIEvalContainer": { "type": "durable-object", "storage": "sqlite" }
   }
 }

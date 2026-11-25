@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ticket287457",
+  "account_id": "ce1589d9d07e86f7f95eb9e12c05afac",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-16",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "vars": {
+    "BOLD_SERVICES_DB_TYPE": "postgresql",
+    "OPTIONAL_LIBS": "mongodb,mysql,influxdb,snowflake,oracle,clickhouse,google"
+  },
+  "containers": [
+    {
+      "class_name": "BoldBIEvalContainer",
+      "image": "./Dockerfile",
+      "image_build_context": ".",
+      "instance_type": "standard-4",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "BOLDBI_CONTAINER", "class_name": "BoldBIEvalContainer" }]
+  },
+  "exports": {
+    "BoldBIEvalContainer": { "type": "durable-object", "storage": "sqlite" }
+  }
+}
