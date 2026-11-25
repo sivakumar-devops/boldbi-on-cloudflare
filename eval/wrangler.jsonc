@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "boldbi-eval",
-  "account_id": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
+  "name": "ticket287457",
+  "account_id": "ce1589d9d07e86f7f95eb9e12c05afac",
   "main": "worker.ts",
   "compatibility_date": "2026-10-16",
   "workers_dev": true,
