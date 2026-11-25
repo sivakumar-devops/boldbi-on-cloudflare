@@ -1,6 +1,6 @@
 # Bold BI single container on Cloudflare (R2 storage + external database)
 
-One Bold BI container (`syncfusion/boldbi:17.1.51_11062026_072923_193588_patch`) behind a Worker.
+One Bold BI container (private image `syncfusion/dev-boldbi-docker:17.1.51_11062026_072923_193588_patch`) behind a Worker.
 Files are stored in Cloudflare R2 (storage type 5). The database is external; none is bundled.
 It is the Cloudflare equivalent of the compose file with `BOLD_SERVICES_*` auto-deployment variables.
 
@@ -27,6 +27,18 @@ Secrets (mandatory):
 
 The Worker answers 503 and lists any missing setting. Optional Bold BI variables
 (`BOLD_SERVICES_DB_PORT`, `_DB_NAME`, ...) are not passed; the defaults apply (PostgreSQL port 5432).
+
+## Push the private image first
+
+```powershell
+docker login
+docker pull syncfusion/dev-boldbi-docker:17.1.51_11062026_072923_193588_patch
+docker tag syncfusion/dev-boldbi-docker:17.1.51_11062026_072923_193588_patch dev-boldbi-docker:17.1.51_11062026_072923_193588_patch
+npx wrangler containers push dev-boldbi-docker:17.1.51_11062026_072923_193588_patch
+npx wrangler containers images list
+```
+
+`wrangler.jsonc` references the pushed copy in `registry.cloudflare.com`.
 
 ## Deploy
 

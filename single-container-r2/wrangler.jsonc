@@ -13,8 +13,7 @@
   "containers": [
     {
       "class_name": "BoldBIEvalContainer",
-      "image": "./Dockerfile",
-      "image_build_context": ".",
+      "image": "registry.cloudflare.com/ce1589d9d07e86f7f95eb9e12c05afac/dev-boldbi-docker:17.1.51_11062026_072923_193588_patch",
       "instance_type": "standard-4",
       "max_instances": 1
     }
