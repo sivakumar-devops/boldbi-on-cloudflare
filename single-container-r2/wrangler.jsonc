@@ -24,6 +24,6 @@
   },
   "exports": {
     "BoldBIContainer": { "type": "durable-object", "storage": "sqlite" },
-    "BoldBIEvalContainer": { "type": "durable-object", "state": "deleted" }
+    "BoldBIEvalContainer": { "type": "durable-object", "storage": "sqlite" }
   }
 }

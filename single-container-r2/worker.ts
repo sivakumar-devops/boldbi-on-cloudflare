@@ -122,6 +122,13 @@ export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: 
   return new Response(r.out, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
+// TEMPORARY (step 1 of 2): keeps the retired namespace alive while the binding moves to BoldBIContainer.
+// Step 2 removes this stub and marks the class deleted in wrangler.jsonc.
+export class BoldBIEvalContainer {
+  constructor(_ctx: unknown, _env: unknown) {}
+  async fetch(): Promise<Response> { return new Response("retired", { status: 410 }); }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (new URL(request.url).pathname.startsWith("/_internal/diag/")) {
