@@ -64,3 +64,10 @@ Invoke-RestMethod -Headers $h "https://poc-cloudflare-bi.synctester.com/_interna
 Invoke-RestMethod -Headers $h "https://poc-cloudflare-bi.synctester.com/_internal/diag/logs?file=/application/<path>.log&lines=300&grep=ERROR"
 ```
 It never starts the container, and only reads `.log`/`.txt` files under `/application`, `/var/log`, `/tmp`.
+
+Download the whole `/application/app_data/logs` folder as one archive:
+
+```powershell
+Invoke-WebRequest -Headers $h "https://poc-cloudflare-bi.synctester.com/_internal/diag/logs.tgz" -OutFile boldbi-logs.tgz
+tar -xzf boldbi-logs.tgz
+```

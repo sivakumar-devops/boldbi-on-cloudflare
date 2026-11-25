@@ -54,4 +54,14 @@ describe("single-container-r2 Worker", () => {
     const ok = await handleDiag(req("?file=/application/app_data/logs/a.log&grep=ERROR"), env, { diagRun });
     expect(await ok.text()).toBe("line1");
   });
+  it("returns the logs folder as a gzip download, token required", async () => {
+    const b64 = btoa("hello");
+    const stub = { diagRun: vi.fn(async () => ({ ok: true, out: b64 })) };
+    const url = "https://app.example/_internal/diag/logs.tgz";
+    expect((await handleDiag(new Request(url), { ADMIN_TOKEN: "t" } as never, stub)).status).toBe(403);
+    const res = await handleDiag(new Request(url, { headers: { "X-Admin-Token": "t" } }), { ADMIN_TOKEN: "t" } as never, stub);
+    expect(res.headers.get("Content-Disposition")).toContain("boldbi-logs.tgz");
+    expect(await res.text()).toBe("hello");
+    expect(stub.diagRun).toHaveBeenCalledWith(expect.stringContaining("tar -czf"));
+  });
 });

@@ -65,6 +65,7 @@ export class BoldBIEvalContainer extends Container<Env> {
 }
 
 const SAFE_LOG_FILE = /^\/(application|var\/log|tmp)\/[A-Za-z0-9._\/-]{1,200}\.(log|txt)$/;
+const MAX_ARCHIVE_B64 = 20_000_000;
 const SAFE_FILTER = /^[A-Za-z0-9 ._:=-]{1,80}$/;
 
 function clampInt(v: string | null, def: number, min: number, max: number): number {
@@ -87,7 +88,16 @@ async function sameToken(given: string | null, expected: string | undefined): Pr
 export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: string): Promise<{ ok: boolean; out: string; err?: string }> }): Promise<Response> {
   if (!(await sameToken(request.headers.get("X-Admin-Token"), env.ADMIN_TOKEN))) return new Response("Forbidden", { status: 403 });
   const url = new URL(request.url);
-  if (url.pathname !== "/_internal/diag/logs" || request.method !== "GET") return new Response("Not found", { status: 404 });
+  if (request.method !== "GET") return new Response("Not found", { status: 404 });
+  if (url.pathname === "/_internal/diag/logs.tgz") {
+    // The whole /application/app_data/logs folder as one gzip tar (sent through exec as base64, then decoded here).
+    const r = await stub.diagRun("tar -czf - -C /application/app_data logs 2>/dev/null | base64 -w0");
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    if (r.out.length > MAX_ARCHIVE_B64) return Response.json({ error: "logs archive is too large; read single files with ?file=" }, { status: 413 });
+    const bytes = Uint8Array.from(atob(r.out), c => c.charCodeAt(0));
+    return new Response(bytes, { headers: { "Content-Type": "application/gzip", "Content-Disposition": 'attachment; filename="boldbi-logs.tgz"', "Cache-Control": "no-store" } });
+  }
+  if (url.pathname !== "/_internal/diag/logs") return new Response("Not found", { status: 404 });
   const file = url.searchParams.get("file");
   if (!file) {
     const r = await stub.diagRun("find /application /var/log /tmp -type f \\( -name '*.log' -o -name '*.txt' \\) -printf '%T@ %s %p\\n' 2>/dev/null | sort -rn | head -50 | cut -d' ' -f2-");
