@@ -76,10 +76,10 @@ describe("single-container-r2 Worker", () => {
     expect(stub.diagRun.mock.calls[0][0]).toContain("truncate -s 0");
   });
   it("lists env var names with masked values, only with GET and the token", async () => {
-    // The bash side dumps all env vars; the Worker parses BOLD_SERVICES_* entries and masks the values.
+    // The bash side scans /proc/*/environ and dumps BOLD_SERVICES_*; the Worker masks the values.
     const stub = { diagRun: vi.fn(async () => ({
       ok: true,
-      out: "---ALL---\nBOLD_SERVICES_DB_HOST=my-hostname\nBOLD_SERVICES_DB_PASSWORD=secret-123456\nBOLD_SERVICES_USER_EMAIL=\nOPTIONAL_LIBS=mongodb\nPATH=/usr/bin\n---BOLD_SERVICES_---\nBOLD_SERVICES_DB_HOST=my-hostname\nBOLD_SERVICES_DB_PASSWORD=secret-123456\nBOLD_SERVICES_USER_EMAIL=\n---END---"
+      out: "BOLD_SERVICES_DB_HOST=my-hostname\nBOLD_SERVICES_DB_PASSWORD=secret-123456\nBOLD_SERVICES_USER_EMAIL="
     })) };
     const env = { ADMIN_TOKEN: "t" } as never;
     const url = "https://app.example/_internal/diag/env";
@@ -87,14 +87,11 @@ describe("single-container-r2 Worker", () => {
     expect((await handleDiag(new Request(url, { method: "POST", headers: { "X-Admin-Token": "t" } }), env, stub)).status).toBe(405);
     const res = await handleDiag(new Request(url, { headers: { "X-Admin-Token": "t" } }), env, stub);
     expect(res.status).toBe(200);
-    const json = await res.json() as { bold_services: Array<{ name: string; value: string; length: number }>; masked_raw: string };
+    const json = await res.json() as { bold_services: Array<{ name: string; value: string; length: number }> };
     expect(json.bold_services).toEqual([
       { name: "BOLD_SERVICES_DB_HOST", value: "my***me", length: 11 },
       { name: "BOLD_SERVICES_DB_PASSWORD", value: "se***56", length: 13 },
       { name: "BOLD_SERVICES_USER_EMAIL", value: "(empty)", length: 0 },
     ]);
-    expect(json.masked_raw).toContain("BOLD_SERVICES_DB_HOST=my***me");
-    expect(json.masked_raw).toContain("BOLD_SERVICES_DB_PASSWORD=se***56");
-    expect(json.masked_raw).not.toContain("secret-123456");
   });
 });
