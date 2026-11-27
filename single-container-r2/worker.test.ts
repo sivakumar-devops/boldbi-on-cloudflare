@@ -99,6 +99,17 @@ describe("single-container-r2 Worker", () => {
     expect(await res.text()).toBe("hello");
     expect(stub.diagRun).toHaveBeenCalledWith(expect.stringContaining("tar -czf"));
   });
+  it("restarts the container only with POST and the token", async () => {
+    const stub = { diagRun: vi.fn(), diagRestart: vi.fn(async () => ({ ok: true })) };
+    const url = "https://app.example/_internal/diag/restart";
+    const env = { ADMIN_TOKEN: "t" } as never;
+    expect((await handleDiag(new Request(url, { method: "POST" }), env, stub)).status).toBe(403);
+    expect((await handleDiag(new Request(url, { headers: { "X-Admin-Token": "t" } }), env, stub)).status).toBe(405);
+    expect(stub.diagRestart).not.toHaveBeenCalled();
+    const ok = await handleDiag(new Request(url, { method: "POST", headers: { "X-Admin-Token": "t" } }), env, stub);
+    expect(ok.status).toBe(200);
+    expect(stub.diagRestart).toHaveBeenCalledTimes(1);
+  });
   it("clears logs only with POST and the token", async () => {
     const stub = { diagRun: vi.fn(async () => ({ ok: true, out: "cleared 3 files" })) };
     const url = "https://app.example/_internal/diag/logs/clear";

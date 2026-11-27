@@ -93,6 +93,16 @@ export class BoldBIContainer extends Container<Env> {
     }
   }
 
+  // DIAGNOSTIC (admin only): stops the container and discards its disk. The next request starts a fresh one.
+  async diagRestart(): Promise<{ ok: boolean; err?: string }> {
+    try {
+      await this.destroy();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, err: String(e) };
+    }
+  }
+
   override async fetch(request: Request): Promise<Response> {
     await this.startAndWaitForPorts({
       ports: [80],
@@ -124,7 +134,7 @@ async function sameToken(given: string | null, expected: string | undefined): Pr
 // GET /_internal/diag/logs                          newest log files inside the container
 // GET /_internal/diag/logs?file=/application/...log&lines=300&grep=ERROR   tail one file (optional literal filter)
 // Header X-Admin-Token must equal the ADMIN_TOKEN secret. Read-only; does not start the container.
-export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: string): Promise<{ ok: boolean; out: string; err?: string }> }): Promise<Response> {
+export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: string): Promise<{ ok: boolean; out: string; err?: string }>; diagRestart?(): Promise<{ ok: boolean; err?: string }> }): Promise<Response> {
   if (!(await sameToken(request.headers.get("X-Admin-Token"), env.ADMIN_TOKEN))) return new Response("Forbidden", { status: 403 });
   const url = new URL(request.url);
   if (url.pathname === "/_internal/diag/env") {
@@ -149,6 +159,14 @@ export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: 
       return { name, ...m };
     });
     return Response.json({ bold_services: lines });
+  }
+  if (url.pathname === "/_internal/diag/restart") {
+    if (request.method !== "POST") return Response.json({ error: "use POST" }, { status: 405 });
+    if (!stub.diagRestart) return Response.json({ error: "restart not supported" }, { status: 501 });
+    console.log(JSON.stringify({ diag: "restart" }));
+    const r = await stub.diagRestart();
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    return Response.json({ result: "container destroyed; the next request starts a fresh one" });
   }
   if (url.pathname === "/_internal/diag/logs/clear") {
     // Empties (does not delete) every file under app_data/logs, so running services keep writing to them.
