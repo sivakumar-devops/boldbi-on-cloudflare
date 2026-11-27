@@ -1,7 +1,7 @@
 import { Container } from "@cloudflare/containers";
 
-// Mandatory Bold BI settings (see README.md). Passed to the container unchanged.
-export const REQUIRED_KEYS = [
+// Mandatory Bold BI base settings (see README.md). Passed to the container unchanged.
+export const BASE_REQUIRED_KEYS = [
   "BOLD_SERVICES_UNLOCK_KEY",
   "BOLD_SERVICES_DB_TYPE",
   "BOLD_SERVICES_DB_HOST",
@@ -9,7 +9,12 @@ export const REQUIRED_KEYS = [
   "BOLD_SERVICES_DB_PASSWORD",
   "BOLD_SERVICES_USER_EMAIL",
   "BOLD_SERVICES_USER_PASSWORD",
-  // Cloudflare R2 storage (storage type 5)
+] as const;
+
+// Optional Cloudflare R2 storage settings (storage type 5).
+// When BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME is set, all R2 keys become required and BOLD_SERVICES_STORAGETYPE=5 is passed.
+// When unset, Bold BI runs with default local filesystem storage inside the container.
+export const R2_KEYS = [
   "BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME",
   "BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID",
   "BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY",
@@ -17,20 +22,49 @@ export const REQUIRED_KEYS = [
   "BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME",
 ] as const;
 
-type Env = { BOLDBI_CONTAINER: DurableObjectNamespace<BoldBIContainer>; OPTIONAL_LIBS?: string; ADMIN_TOKEN?: string } &
-  Partial<Record<(typeof REQUIRED_KEYS)[number], string>>;
+export const REQUIRED_KEYS = BASE_REQUIRED_KEYS;
+
+type AllKeys = (typeof BASE_REQUIRED_KEYS)[number] | (typeof R2_KEYS)[number];
+
+type Env = {
+  BOLDBI_CONTAINER: DurableObjectNamespace<BoldBIContainer>;
+  OPTIONAL_LIBS?: string;
+  ADMIN_TOKEN?: string;
+  DISABLE_R2?: string; // set to "true" to force local storage even if R2 secrets exist on Worker
+} & Partial<Record<AllKeys, string>>;
+
+export function isR2Configured(env: Partial<Record<string, string>>): boolean {
+  if (env.DISABLE_R2 === "true" || env.DISABLE_R2 === "1") return false;
+  return Boolean(env.BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME);
+}
 
 export function missingKeys(env: Partial<Record<string, string>>): string[] {
-  return REQUIRED_KEYS.filter(k => !env[k]);
+  const missing: string[] = BASE_REQUIRED_KEYS.filter(k => !env[k]);
+  if (isR2Configured(env)) {
+    for (const k of R2_KEYS) {
+      if (!env[k]) missing.push(k);
+    }
+  }
+  return missing;
 }
 
 export function buildContainerEnv(env: Env): Record<string, string> {
   const vars: Record<string, string> = {
-    BOLD_SERVICES_STORAGETYPE: "5",
     BOLD_SERVICES_REVERSE_PROXY: "true",
     BOLD_SERVICES_CONSOLE_LOG_ENABLED: "true",
   };
-  for (const k of REQUIRED_KEYS) vars[k] = env[k] as string;
+
+  for (const k of BASE_REQUIRED_KEYS) {
+    if (env[k]) vars[k] = env[k] as string;
+  }
+
+  if (isR2Configured(env as Partial<Record<string, string>>)) {
+    vars.BOLD_SERVICES_STORAGETYPE = "5";
+    for (const k of R2_KEYS) {
+      if (env[k]) vars[k] = env[k] as string;
+    }
+  }
+
   if (env.OPTIONAL_LIBS) vars.OPTIONAL_LIBS = env.OPTIONAL_LIBS;
   return vars;
 }

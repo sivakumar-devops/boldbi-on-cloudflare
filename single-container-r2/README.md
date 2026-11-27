@@ -7,9 +7,11 @@ It is the Cloudflare equivalent of the compose file with `BOLD_SERVICES_*` auto-
 ## Settings
 
 Plain variables (already in `wrangler.jsonc`): `BOLD_SERVICES_DB_TYPE=postgresql`, `OPTIONAL_LIBS`.
-The Worker also sets `BOLD_SERVICES_STORAGETYPE=5` and `BOLD_SERVICES_REVERSE_PROXY=true` itself.
+The Worker sets `BOLD_SERVICES_REVERSE_PROXY=true` and `BOLD_SERVICES_CONSOLE_LOG_ENABLED=true`.
+If R2 is configured, it also sets `BOLD_SERVICES_STORAGETYPE=5`.
+To temporarily test without R2 (using default local container storage), set `DISABLE_R2=true` in `wrangler.jsonc` under `vars`.
 
-Secrets (mandatory):
+Base secrets (mandatory):
 
 | Secret | Purpose |
 | --- | --- |
@@ -19,6 +21,11 @@ Secrets (mandatory):
 | `BOLD_SERVICES_DB_PASSWORD` | Database password |
 | `BOLD_SERVICES_USER_EMAIL` | Admin email |
 | `BOLD_SERVICES_USER_PASSWORD` | Admin password (6+ chars, upper, lower, digit, special) |
+
+R2 Storage secrets (optional; when bucket is provided, all 5 become active):
+
+| Secret | Purpose |
+| --- | --- |
 | `BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME` | R2 bucket |
 | `BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID` | R2 access key |
 | `BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY` | R2 secret key |

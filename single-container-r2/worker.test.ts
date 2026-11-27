@@ -5,9 +5,19 @@ vi.mock("@cloudflare/containers", () => ({ Container: class {
   startAndWaitForPorts = vi.fn(async () => {});
   async fetch(_request: Request) { return new Response("container-origin"); }
 } }));
-import worker, { REQUIRED_KEYS, buildContainerEnv, handleDiag, missingKeys } from "./worker";
+import worker, {
+  BASE_REQUIRED_KEYS,
+  R2_KEYS,
+  REQUIRED_KEYS,
+  buildContainerEnv,
+  handleDiag,
+  isR2Configured,
+  missingKeys,
+} from "./worker";
 
-const full = Object.fromEntries(REQUIRED_KEYS.map(k => [k, `v-${k}`]));
+const baseFull = Object.fromEntries(BASE_REQUIRED_KEYS.map(k => [k, `v-${k}`]));
+const r2Full = Object.fromEntries(R2_KEYS.map(k => [k, `v-${k}`]));
+const full = { ...baseFull, ...r2Full };
 
 describe("single-container-r2 Worker", () => {
   it("reports every missing setting with a 503", async () => {
@@ -17,7 +27,23 @@ describe("single-container-r2 Worker", () => {
     expect(await res.text()).toContain("BOLD_SERVICES_UNLOCK_KEY");
     expect(getByName).not.toHaveBeenCalled();
   });
-  it("passes the settings through and forces R2 storage", () => {
+  it("runs without R2 storage when R2 bucket is unset", () => {
+    expect(isR2Configured(baseFull)).toBe(false);
+    expect(missingKeys(baseFull)).toEqual([]);
+    const vars = buildContainerEnv({ ...baseFull, OPTIONAL_LIBS: "mysql" } as never);
+    expect(vars.BOLD_SERVICES_STORAGETYPE).toBeUndefined();
+    expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME).toBeUndefined();
+    expect(vars.BOLD_SERVICES_DB_HOST).toBe("v-BOLD_SERVICES_DB_HOST");
+    expect(vars.OPTIONAL_LIBS).toBe("mysql");
+  });
+  it("can disable R2 explicitly using DISABLE_R2='true'", () => {
+    expect(isR2Configured({ ...full, DISABLE_R2: "true" })).toBe(false);
+    const vars = buildContainerEnv({ ...full, DISABLE_R2: "true" } as never);
+    expect(vars.BOLD_SERVICES_STORAGETYPE).toBeUndefined();
+    expect(vars.BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME).toBeUndefined();
+  });
+  it("passes R2 settings through and sets STORAGETYPE=5 when configured", () => {
+    expect(isR2Configured(full)).toBe(true);
     const vars = buildContainerEnv({ ...full, OPTIONAL_LIBS: "mysql" } as never);
     expect(vars.BOLD_SERVICES_STORAGETYPE).toBe("5");
     expect(vars.BOLD_SERVICES_DB_HOST).toBe("v-BOLD_SERVICES_DB_HOST");
