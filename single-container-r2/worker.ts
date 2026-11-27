@@ -88,6 +88,21 @@ async function sameToken(given: string | null, expected: string | undefined): Pr
 export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: string): Promise<{ ok: boolean; out: string; err?: string }> }): Promise<Response> {
   if (!(await sameToken(request.headers.get("X-Admin-Token"), env.ADMIN_TOKEN))) return new Response("Forbidden", { status: 403 });
   const url = new URL(request.url);
+  if (url.pathname === "/_internal/diag/env") {
+    // List BOLD_SERVICES_* env vars by name with masked values; never reveal the full secret.
+    if (request.method !== "GET") return Response.json({ error: "use GET" }, { status: 405 });
+    const script = "env | grep -E '^BOLD_SERVICES_' | while IFS='=' read -r k v; do n=${#v}; if [ $n -eq 0 ]; then echo \"$k=(empty)\"; elif [ $n -le 8 ]; then echo \"$k=[redacted len=$n]\"; else head=$(printf '%s' \"$v\") ; tail=$(printf '%s' \"$v\" | rev | cut -c1-2 | rev); echo \"$k=[${head}***${tail}] len=$n\"; fi; done | sort";
+    const r = await stub.diagRun(script);
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    const lines = r.out.split("\n").filter(Boolean).map(l => {
+      const m = /^([A-Z0-9_]+)=\[(.+)\] len=(\d+)$/.exec(l) || /^([A-Z0-9_]+)=\(empty\)$/.exec(l);
+      if (!m) return { name: l };
+      if (m[2] === "empty") return { name: m[1], value: "(empty)" };
+      const [_, name, masked, len] = m;
+      return { name, value: masked, length: Number(len) };
+    });
+    return Response.json({ env: lines });
+  }
   if (url.pathname === "/_internal/diag/logs/clear") {
     // Empties (does not delete) every file under app_data/logs, so running services keep writing to them.
     if (request.method !== "POST") return Response.json({ error: "use POST" }, { status: 405 });
