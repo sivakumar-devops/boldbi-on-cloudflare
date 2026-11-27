@@ -91,7 +91,22 @@ export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: 
   if (url.pathname === "/_internal/diag/env") {
     // List BOLD_SERVICES_* env vars by name with masked values; never reveal the full secret.
     if (request.method !== "GET") return Response.json({ error: "use GET" }, { status: 405 });
-    const script = "env | grep -E '^BOLD_SERVICES_' | while IFS='=' read -r k v; do n=${#v}; if [ $n -eq 0 ]; then echo \"$k=(empty)\"; elif [ $n -le 8 ]; then echo \"$k=[redacted len=$n]\"; else head=$(printf '%s' \"$v\") ; tail=$(printf '%s' \"$v\" | rev | cut -c1-2 | rev); echo \"$k=[${head}***${tail}] len=$n\"; fi; done | sort";
+    const r = await stub.diagRun("env | grep -E '^BOLD_SERVICES_' | sort");
+    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
+    const lines = r.out.split("\n").filter(Boolean).map(line => {
+      const idx = line.indexOf("=");
+      if (idx < 0) return { name: line };
+      const name = line.slice(0, idx);
+      const value = line.slice(idx + 1);
+      const n = value.length;
+      if (n === 0) return { name, value: "(empty)" };
+      if (n <= 8) return { name, value: "[redacted]", length: n };
+      const head = value.slice(0, 2);
+      const tail = value.slice(-2);
+      return { name, value: `${head}***${tail}`, length: n };
+    });
+    return Response.json({ env: lines });
+  }
     const r = await stub.diagRun(script);
     if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
     const lines = r.out.split("\n").filter(Boolean).map(l => {
