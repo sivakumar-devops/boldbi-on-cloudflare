@@ -18,7 +18,7 @@ vi.mock("@cloudflare/containers", () => ({
   },
 }));
 
-import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport, locationHintFor, serviceStub, staticCacheEligible, staticCacheTtl, applyStaticCachePolicy } from "./worker";
+import worker, { IdUmsContainer, MultiEnv, buildContainerEnv, buildServiceEntrypoint, internalKeysFor, buildServiceUrls, forwardInternal, OUTBOUND_HOSTS, BiApiContainer, percentile, internalStatsReport, locationHintFor, serviceStub, staticCacheEligible, staticCacheTtl, applyStaticCachePolicy, readinessProbeEnabled, waitForHttpReady } from "./worker";
 
 function setup() {
   const idWebFetch = vi.fn(async () => new Response("id-web-response"));
@@ -138,6 +138,25 @@ describe("multi routing tests", () => {
     for (const [p, body] of cases) expect(await (await s.fetch(p)).text()).toBe(body);
     expect(s.biWebFetch).toHaveBeenCalledTimes(2);
     expect(s.biDesignerFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("builds container env with R2 settings (storage type 5), preferred over S3", () => {
+    const env = {
+      BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME: "bkt",
+      BOLD_SERVICES_CLOUDFLARE_R2_ACCESS_KEY_ID: "id",
+      BOLD_SERVICES_CLOUDFLARE_R2_SECRET_ACCESS_KEY: "secret",
+      BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL: "https://acct.r2.cloudflarestorage.com",
+      BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME: "root",
+      BOLD_SERVICES_AMAZON_BUCKET_NAME: "old-s3",
+    } as MultiEnv;
+    const vars = buildContainerEnv("https://app.example/", env);
+    expect(vars).toMatchObject({
+      BOLD_SERVICES_STORAGETYPE: "5",
+      BOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME: "bkt",
+      BOLD_SERVICES_CLOUDFLARE_R2_ENDPOINT_URL: "https://acct.r2.cloudflarestorage.com",
+      BOLD_SERVICES_CLOUDFLARE_R2_ROOT_FOLDER_NAME: "root",
+    });
+    expect(vars).not.toHaveProperty("BOLD_SERVICES_AMAZON_BUCKET_NAME");
   });
 
   it("builds container env with S3 settings and no database settings", () => {
@@ -331,6 +350,9 @@ describe("performance diagnostics", () => {
     expect((await call("/_internal/diag/curl?from=bad", "secret")).status).toBe(400);
     expect((await call("/_internal/diag/curl?from=id-web&to=id-api&path=/a;rm", "secret")).status).toBe(400);
     expect((await call("/_internal/diag/tcp?from=id-web&host=a;b&port=5432", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/etc/passwd", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/application/../etc/x.log", "secret")).status).toBe(400);
+    expect((await call("/_internal/diag/logs?from=bi-designer&file=/tmp/a.log&grep=a'b", "secret")).status).toBe(400);
     expect((await worker.fetch(new Request("https://app.example/_internal/diag/stats"), env)).status).toBe(403);
   });
 });
@@ -439,3 +461,89 @@ describe("static asset caching", () => {
     expect(biWebFetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("diag exec", () => {
+  it("rejects when EXEC_ENABLED is not set, or when unauthorized", async () => {
+    const { env } = setup();
+    const e = { ...env, ADMIN_TOKEN: "secret" } as MultiEnv;
+    const req = (token?: string) => new Request("https://app.example/_internal/diag/exec?from=bi-designer", {
+      method: "POST", headers: token ? { "X-Admin-Token": token } : {}, body: "ls",
+    });
+    expect((await worker.fetch(req(), e)).status).toBe(403);
+    expect((await worker.fetch(req("wrong"), e)).status).toBe(403);
+    // Even with token, disabled by default
+    expect((await worker.fetch(req("secret"), e)).status).toBe(403);
+  });
+
+  it("executes bash commands across containers when enabled and authorized", async () => {
+    const { env } = setup();
+    const diagExec = vi.fn(async (s: string) => ({ ok: true, out: `ran: ${s}` }));
+    const e = {
+      ...env,
+      ADMIN_TOKEN: "secret",
+      EXEC_ENABLED: "true",
+      BI_DESIGNER_CONTAINER: { getByName: vi.fn(() => ({ diagExec })) } as never,
+    } as MultiEnv;
+
+    const res = await worker.fetch(new Request("https://app.example/_internal/diag/exec?from=bi-designer", {
+      method: "POST",
+      headers: { "X-Admin-Token": "secret" },
+      body: "ls -la /application",
+    }), e);
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, { output?: string }>;
+    expect(body["bi-designer"].output).toContain("ls -la /application");
+    expect(diagExec).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("compatibility changes", () => {
+  it("sets X-Forwarded-For from CF-Connecting-IP only when absent", async () => {
+    const { fetch, idWebFetch } = setup();
+    await fetch("/", { headers: { "CF-Connecting-IP": "1.2.3.4" } });
+    expect(((idWebFetch.mock.calls[0] as unknown[])[0] as Request).headers.get("X-Forwarded-For")).toBe("1.2.3.4");
+    await fetch("/", { headers: { "CF-Connecting-IP": "1.2.3.4", "X-Forwarded-For": "9.9.9.9" } });
+    expect(((idWebFetch.mock.calls[1] as unknown[])[0] as Request).headers.get("X-Forwarded-For")).toBe("9.9.9.9");
+  });
+
+  it("rejects bodies over 200 MB with 413 and lets smaller ones through", async () => {
+    const { fetch, idWebFetch } = setup();
+    const big = await fetch("/", { method: "POST", headers: { "Content-Length": String(200 * 1024 * 1024 + 1) }, body: "x" });
+    expect(big.status).toBe(413);
+    expect(idWebFetch).not.toHaveBeenCalled();
+    const ok = await fetch("/", { method: "POST", headers: { "Content-Length": "10" }, body: "x" });
+    expect(ok.status).toBe(200);
+  });
+
+  it("enables the readiness probe only for listed services", () => {
+    expect(readinessProbeEnabled({}, "bi-designer")).toBe(false);
+    expect(readinessProbeEnabled({ READINESS_PROBE_SERVICES: "bi-designer" }, "bi-designer")).toBe(true);
+    expect(readinessProbeEnabled({ READINESS_PROBE_SERVICES: "bi-designer" }, "bi-api")).toBe(false);
+    expect(readinessProbeEnabled({ READINESS_PROBE_SERVICES: "all" }, "bi-api")).toBe(true);
+  });
+
+  it("waitForHttpReady retries until status < 500, and gives up at the timeout", async () => {
+    const statuses = [503, 500, 404];
+    const probe = vi.fn(async () => statuses.shift()!);
+    expect(await waitForHttpReady(probe, 1000, 1)).toBe(true);
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(await waitForHttpReady(async () => { throw new Error("refused"); }, 20, 5)).toBe(false);
+  });
+});
+
+  it("warms up all 10 services on scheduled event", async () => {
+    const s = setup();
+    expect(worker.scheduled).toBeDefined();
+    await worker.scheduled!({ cron: "*/15 * * * *", scheduledTime: Date.now() }, s.env);
+    expect(s.idWebFetch).toHaveBeenCalled();
+    expect(s.idApiFetch).toHaveBeenCalled();
+    expect(s.idUmsFetch).toHaveBeenCalled();
+    expect(s.biWebFetch).toHaveBeenCalled();
+    expect(s.biApiFetch).toHaveBeenCalled();
+    expect(s.biJobsFetch).toHaveBeenCalled();
+    expect(s.biDesignerFetch).toHaveBeenCalled();
+    expect(s.etlFetch).toHaveBeenCalled();
+    expect(s.aiFetch).toHaveBeenCalled();
+    expect(s.mcpFetch).toHaveBeenCalled();
+  });
