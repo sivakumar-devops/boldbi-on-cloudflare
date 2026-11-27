@@ -91,21 +91,34 @@ export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: 
   if (url.pathname === "/_internal/diag/env") {
     // List BOLD_SERVICES_* env vars by name with masked values; never reveal the full secret.
     if (request.method !== "GET") return Response.json({ error: "use GET" }, { status: 405 });
-    const r = await stub.diagRun("env | grep -E '^BOLD_SERVICES_' | sort");
+    // Run two greps: one for BOLD_SERVICES_*, one for OPTIONAL_LIBS (often set as a var), and one for ANY env var so we can see if bash is finding anything at all.
+    const script = "echo '---ALL---'; env | sort; echo '---BOLD_SERVICES_---'; env | grep -E '^BOLD_SERVICES_' | sort; echo '---END---'";
+    const r = await stub.diagRun(script);
     if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
-    const lines = r.out.split("\n").filter(Boolean).map(line => {
-      const idx = line.indexOf("=");
-      if (idx < 0) return { name: line };
-      const name = line.slice(0, idx);
-      const value = line.slice(idx + 1);
-      const n = value.length;
-      if (n === 0) return { name, value: "(empty)" };
-      if (n <= 8) return { name, value: "[redacted]", length: n };
-      const head = value.slice(0, 2);
-      const tail = value.slice(-2);
-      return { name, value: `${head}***${tail}`, length: n };
-    });
-    return Response.json({ env: lines });
+    const raw = r.out;
+    const mask = (v: string): { value: string; length: number } => {
+      const n = v.length;
+      if (n === 0) return { value: "(empty)", length: 0 };
+      if (n <= 8) return { value: "[redacted]", length: n };
+      return { value: `${v.slice(0, 2)}***${v.slice(-2)}`, length: n };
+    };
+    const maskLine = (line: string): string => {
+      const i = line.indexOf("=");
+      if (i < 0) return line;
+      const name = line.slice(0, i);
+      if (!name.startsWith("BOLD_SERVICES_") && name !== "OPTIONAL_LIBS") return line;
+      return `${name}=${mask(line.slice(i + 1)).value}`;
+    };
+    const maskedRaw = raw.split("\n").map(maskLine).join("\n");
+    const blockMatch = /---BOLD_SERVICES_---\n([\s\S]*?)\n---END---/.exec(raw);
+    const boldLines = blockMatch ? blockMatch[1].split("\n").filter(Boolean).map(line => {
+      const i = line.indexOf("=");
+      if (i < 0) return { name: line };
+      const name = line.slice(0, i);
+      const m = mask(line.slice(i + 1));
+      return { name, ...m };
+    }) : [];
+    return Response.json({ bold_services: boldLines, masked_raw: maskedRaw });
   }
   if (url.pathname === "/_internal/diag/logs/clear") {
     // Empties (does not delete) every file under app_data/logs, so running services keep writing to them.
