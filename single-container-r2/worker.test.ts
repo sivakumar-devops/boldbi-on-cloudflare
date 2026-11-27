@@ -76,14 +76,19 @@ describe("single-container-r2 Worker", () => {
     expect(stub.diagRun.mock.calls[0][0]).toContain("truncate -s 0");
   });
   it("lists env var names with masked values, only with GET and the token", async () => {
-    const stub = { diagRun: vi.fn(async () => ({ ok: true, out: "BOLD_SERVICES_DB_HOST=[ho***st] len=8\nBOLD_SERVICES_CLOUDFLARE_R2_BUCKET_NAME=[bi***ne] len=12" })) };
+    // The bash side just dumps `KEY=value`; masking happens in the Worker.
+    const stub = { diagRun: vi.fn(async () => ({ ok: true, out: "BOLD_SERVICES_DB_HOST=my-hostname\nBOLD_SERVICES_DB_PASSWORD=secret-123456\nBOLD_SERVICES_USER_EMAIL=" })) };
     const env = { ADMIN_TOKEN: "t" } as never;
     const url = "https://app.example/_internal/diag/env";
     expect((await handleDiag(new Request(url), env, stub)).status).toBe(403);
     expect((await handleDiag(new Request(url, { method: "POST", headers: { "X-Admin-Token": "t" } }), env, stub)).status).toBe(405);
     const res = await handleDiag(new Request(url, { headers: { "X-Admin-Token": "t" } }), env, stub);
     expect(res.status).toBe(200);
-    const json = await res.json() as { env: Array<{ name: string; value: string; length: number }> };
-    expect(json.env.find(e => e.name === "BOLD_SERVICES_DB_HOST")).toEqual({ name: "BOLD_SERVICES_DB_HOST", value: "ho***st", length: 8 });
+    const json = await res.json() as { env: Array<{ name: string; value: string; length?: number }> };
+    expect(json.env).toEqual([
+      { name: "BOLD_SERVICES_DB_HOST", value: "my***me", length: 11 },
+      { name: "BOLD_SERVICES_DB_PASSWORD", value: "se***56", length: 13 },
+      { name: "BOLD_SERVICES_USER_EMAIL", value: "(empty)" },
+    ]);
   });
 });

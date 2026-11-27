@@ -107,17 +107,6 @@ export async function handleDiag(request: Request, env: Env, stub: { diagRun(s: 
     });
     return Response.json({ env: lines });
   }
-    const r = await stub.diagRun(script);
-    if (!r.ok) return Response.json({ error: r.err }, { status: 502 });
-    const lines = r.out.split("\n").filter(Boolean).map(l => {
-      const m = /^([A-Z0-9_]+)=\[(.+)\] len=(\d+)$/.exec(l) || /^([A-Z0-9_]+)=\(empty\)$/.exec(l);
-      if (!m) return { name: l };
-      if (m[2] === "empty") return { name: m[1], value: "(empty)" };
-      const [_, name, masked, len] = m;
-      return { name, value: masked, length: Number(len) };
-    });
-    return Response.json({ env: lines });
-  }
   if (url.pathname === "/_internal/diag/logs/clear") {
     // Empties (does not delete) every file under app_data/logs, so running services keep writing to them.
     if (request.method !== "POST") return Response.json({ error: "use POST" }, { status: 405 });
