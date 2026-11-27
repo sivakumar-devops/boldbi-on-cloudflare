@@ -9,7 +9,10 @@ It is the Cloudflare equivalent of the compose file with `BOLD_SERVICES_*` auto-
 Plain variables (already in `wrangler.jsonc`): `BOLD_SERVICES_DB_TYPE=postgresql`, `OPTIONAL_LIBS`.
 The Worker sets `BOLD_SERVICES_REVERSE_PROXY=true` and `BOLD_SERVICES_CONSOLE_LOG_ENABLED=true`.
 If R2 is configured, it also sets `BOLD_SERVICES_STORAGETYPE=5`.
-To temporarily test without R2 (using default local container storage), set `DISABLE_R2=true` in `wrangler.jsonc` under `vars`.
+
+Optional test/debug variables (in `wrangler.jsonc` under `vars`):
+- `DISABLE_R2: "true"`: forces local container storage (disables R2 variables).
+- `INSTANCE_NAME: "boldbi-fresh-1"`: changes the Durable Object instance name. Changing this immediately starts a 100% clean, blank container instance without any residual state or cached disk files from previous runs.
 
 Base secrets (mandatory):
 

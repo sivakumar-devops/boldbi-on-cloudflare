@@ -10,6 +10,7 @@ import worker, {
   R2_KEYS,
   REQUIRED_KEYS,
   buildContainerEnv,
+  getContainerInstanceName,
   handleDiag,
   isR2Configured,
   missingKeys,
@@ -58,6 +59,14 @@ describe("single-container-r2 Worker", () => {
     expect(getByName).toHaveBeenCalledWith("boldbi-r2", { locationHint: "enam" });
     expect(containerFetch.mock.calls[0][0].headers.get("X-Forwarded-Proto")).toBe("https");
     expect(res.headers.get("Content-Security-Policy")).toContain("upgrade-insecure-requests");
+  });
+  it("uses custom INSTANCE_NAME when provided to switch to a clean container", async () => {
+    expect(getContainerInstanceName({ BOLDBI_CONTAINER: {} as never })).toBe("boldbi-r2");
+    expect(getContainerInstanceName({ BOLDBI_CONTAINER: {} as never, INSTANCE_NAME: "boldbi-fresh-1" })).toBe("boldbi-fresh-1");
+    const containerFetch = vi.fn(async (_r: Request) => new Response("ok"));
+    const getByName = vi.fn(() => ({ fetch: containerFetch }));
+    await worker.fetch(new Request("https://app.example/x"), { ...full, INSTANCE_NAME: "boldbi-fresh-1", BOLDBI_CONTAINER: { getByName } } as never);
+    expect(getByName).toHaveBeenCalledWith("boldbi-fresh-1", { locationHint: "enam" });
   });
   it("diagnostics reject a missing or wrong token and never reach the container", async () => {
     const diagRun = vi.fn();

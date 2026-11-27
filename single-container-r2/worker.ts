@@ -31,7 +31,12 @@ type Env = {
   OPTIONAL_LIBS?: string;
   ADMIN_TOKEN?: string;
   DISABLE_R2?: string; // set to "true" to force local storage even if R2 secrets exist on Worker
+  INSTANCE_NAME?: string; // customize DO instance name (defaults to "boldbi-r2", e.g. "boldbi-fresh-1")
 } & Partial<Record<AllKeys, string>>;
+
+export function getContainerInstanceName(env: Env): string {
+  return env.INSTANCE_NAME?.trim() || "boldbi-r2";
+}
 
 export function isR2Configured(env: Partial<Record<string, string>>): boolean {
   if (env.DISABLE_R2 === "true" || env.DISABLE_R2 === "1") return false;
@@ -190,7 +195,8 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (new URL(request.url).pathname.startsWith("/_internal/diag/")) {
       try {
-        return await handleDiag(request, env, env.BOLDBI_CONTAINER.getByName("boldbi-r2", { locationHint: "enam" }));
+        const instance = getContainerInstanceName(env);
+        return await handleDiag(request, env, env.BOLDBI_CONTAINER.getByName(instance, { locationHint: "enam" }));
       } catch (e) {
         console.log(JSON.stringify({ diag: "error", error: String(e) }));
         return Response.json({ error: String(e) }, { status: 502 });
@@ -203,7 +209,8 @@ export default {
     headers.set("X-Forwarded-Proto", url.protocol.slice(0, -1));
     headers.set("X-Forwarded-Host", url.host);
     // A new Durable Object name is created in the hinted region (US East), near the database.
-    const stub = env.BOLDBI_CONTAINER.getByName("boldbi-r2", { locationHint: "enam" });
+    const instance = getContainerInstanceName(env);
+    const stub = env.BOLDBI_CONTAINER.getByName(instance, { locationHint: "enam" });
     const response = await stub.fetch(new Request(request, { headers }));
     if (response.status === 101) return response;
     const secured = new Response(response.body, response);
